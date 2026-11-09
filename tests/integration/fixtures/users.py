@@ -8,6 +8,7 @@ from app.domain.user_model import User
 from app.dto.enum import UserRole
 from app.repositories.user_repository import UserRepository
 from app.schemas.pydantic.user import UserCreate
+from tests.integration.helpers.cleanup import drop_grafana_orgs
 from tests.integration.helpers.keys import (
     ADMIN_USER_KEY,
     REGULAR_USER_KEY,
@@ -90,6 +91,7 @@ def admin_user_token(database, cc, admin_user) -> str:
 def extra_user(database, cc) -> User:
     user = _create_user(database, cc, unique_name("extra"), fresh_key())
     yield user
+    drop_grafana_orgs([user])
     UserRepository(db=database).delete(User(uuid=user.uuid))
 
 

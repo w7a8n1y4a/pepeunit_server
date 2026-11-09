@@ -4,6 +4,7 @@ import json
 import logging
 import string
 import time
+import urllib.parse
 
 import httpx
 from fastapi import Depends
@@ -414,6 +415,18 @@ class GrafanaRepository:
             )
             resp.raise_for_status()
 
+    def delete_org(self, org_id: str) -> None:
+        with self._http_client() as client:
+            resp = self._request(
+                client,
+                "DELETE",
+                f"{settings.pu_link}/grafana/api/orgs/{org_id}",
+                headers=self.headers,
+            )
+            if resp.status_code == 404:
+                return
+            resp.raise_for_status()
+
     def ensure_org_member(self, user: User, org_id: str) -> None:
         with self._http_client() as client:
             self._ensure_org_member(client, org_id, user)
@@ -452,24 +465,27 @@ class GrafanaRepository:
         if resp.status_code not in (200, 409):
             resp.raise_for_status()
 
+    def _find_org_id_by_name(
+        self, client: httpx.Client, name: str
+    ) -> int | None:
+        # Exact lookup: GET /api/orgs is paginated and misses orgs on big instances
+        resp = self._request(
+            client,
+            "GET",
+            f"{settings.pu_link}/grafana/api/orgs/name/"
+            f"{urllib.parse.quote(name, safe='')}",
+            headers=self.headers,
+        )
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.json().get("id")
+
     def create_org_if_not_exists(self, user: User):
         with self._http_client() as client:
-            resp = self._request(
-                client,
-                "GET",
-                f"{settings.pu_link}/grafana/api/orgs",
-                headers=self.headers,
-            )
-            resp.raise_for_status()
+            org_id = self._find_org_id_by_name(client, user.hash_public_key)
 
-            orgs = [
-                org
-                for org in resp.json()
-                if org["name"] == user.hash_public_key
-            ]
-            target_org = orgs[0] if orgs else None
-
-            if not target_org:
+            if org_id is None:
                 resp = self._request(
                     client,
                     "POST",
@@ -477,10 +493,16 @@ class GrafanaRepository:
                     headers=self.headers,
                     json={"name": user.hash_public_key},
                 )
-                resp.raise_for_status()
-                org_id = resp.json().get("orgId")
-            else:
-                org_id = target_org["id"]
+                if resp.status_code == 409:
+                    # Lost a race or the org exists but was not visible
+                    org_id = self._find_org_id_by_name(
+                        client, user.hash_public_key
+                    )
+                    if org_id is None:
+                        resp.raise_for_status()
+                else:
+                    resp.raise_for_status()
+                    org_id = resp.json().get("orgId")
 
             self._ensure_org_member(client, org_id, user)
 

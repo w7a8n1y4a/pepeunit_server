@@ -4,7 +4,9 @@
     <img align="center" src="https://pepeunit.com/pepeunit-og.jpg"  width="640" height="320">
 </div>
 
-Backend [Pepeunit](https://github.com/w7a8n1y4a/pepeunit): REST API, MQTT, Telegram Bot и [DataPipe](https://pepeunit.com/library/docs?doc=deployment/dependencies/datapipe). Работает на `FastAPI`, `PostgreSQL`, `ClickHouse`, `Redis` и `EMQX`. Команды: `make help`.
+Backend [Pepeunit](https://github.com/w7a8n1y4a/pepeunit): REST API, MQTT, Telegram Bot и [DataPipe](https://pepeunit.com/library/docs?doc=deployment/dependencies/datapipe).
+
+Работает на `FastAPI`, `PostgreSQL`, `ClickHouse`, `Redis` и `EMQX`. Команды: `make help`.
 
 ## Документация
 

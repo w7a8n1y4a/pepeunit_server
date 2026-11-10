@@ -4,56 +4,19 @@
     <img align="center" src="https://pepeunit.com/pepeunit-og.jpg"  width="640" height="320">
 </div>
 
-## [Карта проекта](https://pepeunit.com/development-pepeunit/maps.html)
+Backend [Pepeunit](https://github.com/w7a8n1y4a/pepeunit): REST API, MQTT, Telegram Bot и [DataPipe](https://pepeunit.com/library/docs?doc=deployment/dependencies/datapipe). Работает на `FastAPI`, `PostgreSQL`, `ClickHouse`, `Redis` и `EMQX`. Команды: `make help`.
 
-## Управление проектом
-```bash
-make help
-```
+## Документация
 
-## Основные этапы развёртывания
-1. Установите пакеты при помощи команды:
-   ```bash
-   make install
-   ```
-1. Настройте `.env` файл по образцу `.env_example` - [Подробнее о переменных окружения](https://pepeunit.com/deployment/env-variables.html#backend)
-1. Выполните миграцию в БД:
-   ```bash
-   make migrate
-   ```
-1. Запустите приложение командой:
-   ```bash
-   make start
-   ```
+- [Развёртывание инстанса](https://pepeunit.com/library/docs?doc=deployment/docker/deploy)
+- [Backend: зависимость](https://pepeunit.com/library/docs?doc=deployment/dependencies/backend)
+- [Переменные окружения Backend](https://pepeunit.com/library/docs?doc=deployment/env-variables/backend)
+- [Настройки инстанса](https://pepeunit.com/library/docs?doc=deployment/instance-settings)
+- [Сущности](https://pepeunit.com/library/docs?doc=development-pepeunit/mechanics/entities)
+- [Тесты](https://pepeunit.com/library/docs?doc=development-pepeunit/tests/module-test)
+- [Вклад в проект](https://pepeunit.com/library/docs?doc=development-pepeunit/contribution)
+- [Карта репозиториев](https://pepeunit.com/library/docs?doc=development-pepeunit/maps)
 
-## Важно
+## Лицензия
 
-### Поддержание формата кода
-1. Установите `.pre-commit-config.yaml` на основе `.pre-commit-config.example.yaml`
-2. Теперь при каждом коммите у вас будет происходить проверка модульных тестов и линтера `Ruff`
-3. В случае, если нужно запустить вручную
-   ```bash
-   pre-commit run --all-files
-   ```
-
-### Миграции базы данных
-1. Создание новой миграции:
-   ```bash
-   alembic revision -m 'best_revision_name'
-   ```
-1. Применение новой миграции:
-   ```bash
-   make migrate
-   ```
-
-### Набор команд для установки в BotFather
-```text
-repo - Repo
-unit - Unit Actions
-dashboard - Dashboard List url
-peers - Peer List
-alerts - Alerts and operation status
-info - Instance Metrics
-help - About Instance
-control - Admin Operations
-```
+[AGPL-3.0](LICENSE)

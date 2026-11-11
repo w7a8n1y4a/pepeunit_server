@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Self
 
 from app import runtime
@@ -13,11 +13,12 @@ NO_PAGINATION = -1
 @dataclass(kw_only=True)
 class BasePaginationRestMixin:
     offset: int = 0
-    limit: int = field(
-        default_factory=lambda: runtime.get().pu_instance_max_pagination_size
-    )
+    limit: int | None = None
 
     def __post_init__(self):
+        if self.limit is None:
+            self.limit = runtime.get().pu_instance_max_pagination_size
+
         if self.offset < 0:
             msg = "offset must be >= 0"
             raise ValidationError(msg, code=ErrorCode.PAGINATION_OFFSET)

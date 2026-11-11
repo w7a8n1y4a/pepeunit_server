@@ -69,6 +69,7 @@ class RestClient:
             timeout=runtime.get().http_timeout(),
         )
 
+        target_repo.raise_for_status()
         target_repo = target_repo.json()
 
         if target_repo["count"] == 0:

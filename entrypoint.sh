@@ -1,5 +1,19 @@
 #!/bin/bash
 
+REPO_CACHE_PATH="${PU_SAVE_REPO_PATH:-repo_cache}"
+
+if [ "$(id -u)" -eq 0 ]; then
+  echo "Fix repository cache ownership..."
+  mkdir -p -- "$REPO_CACHE_PATH" || exit 1
+  chown -R pepeunit:pepeunit -- "$REPO_CACHE_PATH" || exit 1
+  exec gosu pepeunit /bin/bash "$0" "$@"
+fi
+
+if ! mkdir -p -- "$REPO_CACHE_PATH" || [ ! -w "$REPO_CACHE_PATH" ]; then
+  echo "Repository cache is not writable: $REPO_CACHE_PATH" >&2
+  exit 1
+fi
+
 DB_USER=$(echo "$PU_SQLALCHEMY_DATABASE_URL" | sed -E 's|.*://([^:]+):.*|\1|')
 DB_PASS=$(echo "$PU_SQLALCHEMY_DATABASE_URL" | sed -E 's|.*://[^:]+:([^@]+)@.*|\1|')
 DB_HOST=$(echo "$PU_SQLALCHEMY_DATABASE_URL" | sed -E 's|.*@([^:/]+):.*|\1|')

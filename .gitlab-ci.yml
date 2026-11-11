@@ -270,7 +270,6 @@ deploy:image:master:
     - docker pull $DOCKER_IMAGE_NAME:$DOCKER_IMAGE_TAG
     - docker stop $PROJ || echo $?
     - docker rm $PROJ || echo $?
-    - docker run --rm --user root -v /root/pepeunit/repo_cache:/app/repo_cache --entrypoint chown $DOCKER_IMAGE_NAME:$DOCKER_IMAGE_TAG -R 10001:10001 /app/repo_cache
     - docker run -d --name=$PROJ -p 5401:5000 --restart=always -v /root/pepeunit/repo_cache:/app/repo_cache --env-file $ENV_FILE $DOCKER_IMAGE_NAME:$DOCKER_IMAGE_TAG
     - docker system prune -a -f
 

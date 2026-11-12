@@ -67,7 +67,7 @@ variables:
 
 .govulncheck:
   variables:
-    GO_IMAGE: golang:1.27.3
+    GO_IMAGE: golang:1.27.4
     GOVULNCHECK_VERSION: v1.9.0
   tags:
     - shell-build-runer

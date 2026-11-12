@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1.27.3 AS datapipe
+FROM --platform=$BUILDPLATFORM golang:1.27.4 AS datapipe
 
 # Same ML-KEM handshake failure as BuildKit, here against proxy.golang.org.
 ENV GODEBUG=tlsmlkem=0
@@ -29,7 +29,7 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
     postgresql-client \
     git \
     ca-certificates \
-    gosu \
+    util-linux \
  && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
@@ -53,7 +53,7 @@ RUN groupadd --system --gid 10001 pepeunit \
  && mkdir -p /app/tmp /app/repo_cache /app/prometheus_metrics \
  && chown -R pepeunit:pepeunit /app/tmp /app/repo_cache /app/prometheus_metrics
 
-# The entrypoint repairs mounted volume ownership, then drops privileges.
+# The entrypoint repairs the cache, then drops privileges before starting the app.
 USER root
 
 CMD ["/bin/bash", "/app/entrypoint.sh"]

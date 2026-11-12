@@ -3,10 +3,15 @@
 REPO_CACHE_PATH="${PU_SAVE_REPO_PATH:-repo_cache}"
 
 if [ "$(id -u)" -eq 0 ]; then
-  echo "Fix repository cache ownership..."
+  if [ -L "$REPO_CACHE_PATH" ]; then
+    echo "Repository cache must be a directory, not a symlink: $REPO_CACHE_PATH" >&2
+    exit 1
+  fi
   mkdir -p -- "$REPO_CACHE_PATH" || exit 1
-  chown -R pepeunit:pepeunit -- "$REPO_CACHE_PATH" || exit 1
-  exec gosu pepeunit /bin/bash "$0" "$@"
+  chown -R -P --no-dereference pepeunit:pepeunit -- "$REPO_CACHE_PATH" || exit 1
+  exec setpriv --reuid=pepeunit --regid=pepeunit --init-groups \
+    --inh-caps=-all --bounding-set=-all --no-new-privs \
+    /bin/bash "$0" "$@"
 fi
 
 if ! mkdir -p -- "$REPO_CACHE_PATH" || [ ! -w "$REPO_CACHE_PATH" ]; then

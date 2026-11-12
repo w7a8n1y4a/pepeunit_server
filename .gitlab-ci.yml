@@ -1,6 +1,7 @@
 variables:
   DOCKER_IMAGE_TAG: $CI_PIPELINE_IID
   DOCKER_IMAGE_NAME: $CI_REGISTRY_IMAGE/$CI_COMMIT_REF_SLUG
+  HUB_IMAGE: w7a8n1y4a/pepeunit-server
 
 # BuildKit is a Go binary. Go 1.24+ offers X25519MLKEM768 in the ClientHello,
 # and on this network the handshake to auth.docker.io times out. The setting
@@ -108,6 +109,7 @@ stages:
   - deploy
   - test
   - tag
+  - release
 
 security:trivy_repo:
   extends: .trivy
@@ -380,8 +382,6 @@ tag:
   stage: tag
   tags:
     - shell-main-pc
-  variables:
-    HUB_IMAGE: w7a8n1y4a/pepeunit-server
   rules:
     - if: $CI_COMMIT_TAG
       when: on_success
@@ -391,10 +391,44 @@ tag:
     - docker buildx inspect --bootstrap
   script:
     - docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --sbom=false -t $HUB_IMAGE:$CI_COMMIT_TAG --push .
-    - >
-      curl --silent --show-error --fail-with-body
-      --request POST "$CI_API_V4_URL/projects/$CI_PROJECT_ID/releases"
-      --header "PRIVATE-TOKEN: $CI_ACCESS_TOKEN"
-      --data-urlencode "name=Release Tag - $CI_COMMIT_TAG"
-      --data-urlencode "tag_name=$CI_COMMIT_TAG"
-      --data-urlencode "description=All builds on [Docker Hub](https://hub.docker.com/r/$HUB_IMAGE/tags) - $CI_COMMIT_TAG"
+
+release:
+  stage: release
+  tags:
+    - shell-main-pc
+  needs:
+    - job: tag
+      artifacts: false
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: on_success
+  script:
+    - |
+      set -eu
+      # GitLab behind a reverse proxy can report an http:// API URL.
+      RELEASES_URL="https://${CI_API_V4_URL#*://}/projects/$CI_PROJECT_ID/releases"
+      RESPONSE=$(mktemp)
+      trap 'rm -f "$RESPONSE"' EXIT
+      STATUS=$(curl --silent --show-error --output "$RESPONSE" --write-out '%{http_code}' \
+        --request POST "$RELEASES_URL" \
+        --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+        --data-urlencode "name=Release Tag - $CI_COMMIT_TAG" \
+        --data-urlencode "tag_name=$CI_COMMIT_TAG" \
+        --data-urlencode "description=All builds on [Docker Hub](https://hub.docker.com/r/$HUB_IMAGE/tags) - $CI_COMMIT_TAG")
+      case "$STATUS" in
+        201)
+          echo "Created release for $CI_COMMIT_TAG"
+          ;;
+        409)
+          # A retry must succeed only if the release really exists.
+          curl --silent --show-error --fail-with-body \
+            --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+            --output "$RESPONSE" "$RELEASES_URL/$CI_COMMIT_TAG" || { cat "$RESPONSE"; exit 1; }
+          echo "Release for $CI_COMMIT_TAG already exists"
+          ;;
+        *)
+          echo "Release creation failed (HTTP $STATUS)" >&2
+          cat "$RESPONSE" >&2
+          exit 1
+          ;;
+      esac

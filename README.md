@@ -1,7 +1,7 @@
 # Pepeunit Backend
 
 <div align="center">
-    <img align="center" src="https://pepeunit.com/pepeunit-og.jpg"  width="640" height="320">
+    <img align="center" src="https://pepeunit.com/images/pepeunit-og.jpg"  width="640" height="320">
 </div>
 
 Backend Pepeunit REST API, MQTT, Telegram Bot и [DataPipe](https://pepeunit.com/library/docs?doc=deployment/dependencies/datapipe).

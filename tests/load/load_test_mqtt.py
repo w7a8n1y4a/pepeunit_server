@@ -1,102 +1,92 @@
 import asyncio
 import hashlib
-import json
 import logging
 import math
 import multiprocessing
-import os
-import signal
-import sys
-import threading
 import time
-
-import psutil
 
 from app import settings
 from tests.load.src.dto.config import LoadTestConfig
-from tests.load.src.loaders.mqtt import MQTTLoadTest
+from tests.load.src.loaders.mqtt import MQTT_TIMEOUT, MQTTLoadTest
 from tests.load.src.setup import MqttTestPreparation
 
-logging.basicConfig(level=logging.WARNING)
 
-
-def handler(signum, frame):
-    sys.exit(1)
-
-
-signal.signal(signal.SIGTERM, handler)
+def run_mqtt_batch(config, units_batch):
+    return asyncio.run(MQTTLoadTest(config, units_batch).start_test())
 
 
 class LoadTester:
-    def __init__(self, config: LoadTestConfig, preparation: MqttTestPreparation):
+    def __init__(
+        self, config: LoadTestConfig, preparation: MqttTestPreparation
+    ):
         self.config = config
         self.preparation = preparation
 
     async def run(self):
         await self.run_mqtt_test()
 
-        sys.exit(0)
-
     def split_units(self):
         num_units = len(self.preparation.units)
+        if not num_units or self.config.workers < 1:
+            raise ValueError(
+                "MQTT load test requires units and at least one worker"
+            )
         num_workers = min(self.config.workers, num_units)
-
         batch_size = math.ceil(num_units / num_workers)
         return [
             self.preparation.units[i : i + batch_size]
             for i in range(0, num_units, batch_size)
         ]
 
-    def run_mqtt_batch(self, units_batch):
-        mqtt_test = MQTTLoadTest(self.config, units_batch)
-        return asyncio.run(mqtt_test.start_test())
+    def check_backend(self):
+        if not self.preparation.is_backend_subs():
+            raise RuntimeError("Backend MQTT subscription disappeared")
 
     async def run_mqtt_test(self):
-        num_workers = self.config.workers
         unit_batches = self.split_units()
-        duration = self.config.duration
+        for unit in self.preparation.units:
+            MQTTLoadTest.validate_unit(unit)
+        self.check_backend()
+        # A module-level SIGTERM handler is inherited/imported by workers and
+        # interrupts multiprocessing finalizers. Let Pool own worker shutdown.
+        context = multiprocessing.get_context("spawn")
+        with context.Pool(processes=len(unit_batches)) as pool:
+            pending = [
+                pool.apply_async(run_mqtt_batch, (self.config, batch))
+                for batch in unit_batches
+            ]
+            results = []
+            deadline = (
+                time.monotonic() + self.config.duration + 3 * MQTT_TIMEOUT + 10
+            )
+            next_check = time.monotonic() + 1
+            while pending:
+                for result in pending[:]:
+                    if result.ready():
+                        # Propagate worker exceptions, preserving their traceback
+                        # and a nonzero process exit status for make/Docker/CI.
+                        results.append(result.get())
+                        pending.remove(result)
+                if time.monotonic() >= next_check:
+                    self.check_backend()
+                    next_check = time.monotonic() + 1
+                if pending:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            "MQTT load workers did not finish in time"
+                        )
+                    await asyncio.sleep(0.1)
+            self.check_backend()
+            pool.close()
+            pool.join()
 
-        def check_backend():
-            start_time = time.time()
-            while time.time() - start_time < duration:
-                time.sleep(1)
-                if not self.preparation.is_backend_subs():
-                    logging.warning(
-                        f"Backend crash on {round(time.time() - start_time, 2)} s"
-                    )
-
-                    terminate_all_children()
-                    os.kill(os.getpid(), signal.SIGTERM)
-
-        def terminate_all_children():
-            parent_process = psutil.Process(os.getpid())
-            children = parent_process.children(recursive=True)
-
-            for child in children:
-                child.terminate()
-            for child in children:
-                child.wait()
-
-        check_backend_thread = threading.Thread(target=check_backend, daemon=True)
-
-        check_backend_thread.start()
-
-        with multiprocessing.Pool(processes=num_workers) as pool:
-            try:
-                results = pool.map(self.run_mqtt_batch, unit_batches)
-
-                check_backend_thread.join()
-
-                logging.warning(
-                    f"Backend sustained {round(sum(results) / self.config.duration, 2)} rps for {self.config.duration} seconds"
-                )
-
-            except Exception as e:
-                print(e)
-
-    def save_report(self, data):
-        with open(self.report_path, "w") as f:
-            json.dump(data, f)
+        logging.info(
+            "MQTT clients sent %s messages (%.2f msg/s over %s seconds per batch); "
+            "backend subscription remained active",
+            sum(results),
+            sum(results) / self.config.duration,
+            self.config.duration,
+        )
 
 
 async def main():
@@ -125,4 +115,5 @@ async def main():
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     asyncio.run(main())

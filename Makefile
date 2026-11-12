@@ -32,6 +32,7 @@ update-deps:
 test-module:
 	@echo "Module test run..."
 	uv run pytest app -v
+	uv run pytest --confcutdir=tests/load tests/load/test_mqtt_regressions.py -v
 
 test-integration:
 	@echo "Integration test run..."

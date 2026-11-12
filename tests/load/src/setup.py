@@ -45,6 +45,7 @@ class MqttTestPreparation:
             timeout=runtime.get().http_timeout(),
         )
 
+        response.raise_for_status()
         return response.json()["token"]
 
     def is_backend_subs(self):
@@ -59,9 +60,12 @@ class MqttTestPreparation:
 
         link = f"{pu_mqtt_http_type}://{pu_mqtt_host}/api/v5/subscriptions?page=1&limit=50&qos=0&topic={self.units[0]['env']['PU_DOMAIN']}%2F%2B%2Fpepeunit"
 
-        data = httpx.get(link, headers=headers, timeout=runtime.get().http_timeout())
+        data = httpx.get(
+            link, headers=headers, timeout=runtime.get().http_timeout()
+        )
 
+        data.raise_for_status()
         count = data.json()["meta"]["count"]
-        logging.warning(f"Count mqtt client with sub topics: {count}")
+        logging.debug("MQTT clients with backend subscriptions: %s", count)
 
         return count >= 1

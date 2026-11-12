@@ -16,7 +16,15 @@ COPY data_pipe/ ./
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     go build -ldflags="-s -w" -o /out/data_pipe .
 
-FROM python:3.14.7-slim-trixie
+FROM python:3.14.7-slim-trixie AS os-deps
+
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
+    postgresql-client \
+    git \
+    ca-certificates \
+ && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
+FROM os-deps AS runtime
 
 ENV PYTHONFAULTHANDLER=1 \
   PYTHONUNBUFFERED=1 \
@@ -24,12 +32,6 @@ ENV PYTHONFAULTHANDLER=1 \
   PIP_DEFAULT_TIMEOUT=100
 
 WORKDIR /app
-
-RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
-    postgresql-client \
-    git \
-    ca-certificates \
- && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 COPY uv.lock pyproject.toml README.md /app/

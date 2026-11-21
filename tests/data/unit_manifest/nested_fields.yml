@@ -1,0 +1,67 @@
+contract_version: v1
+
+search:
+  type: controller
+  execution_type: interpreted
+  name: nested-controller
+  platforms: [linux]
+  description: Demonstrates nested objects, arrays and command variants.
+
+env:
+  PROFILE:
+    type: object
+    fields:
+      name: {type: string, max_bytes: 32}
+      thresholds:
+        type: array
+        max_items: 4
+        items: {type: float, min: -55, max: 125, unit: Cel}
+      note: {type: string, nullable: true, optional: true}
+    default: {name: room, thresholds: [18, 25]}
+    example: {name: office, thresholds: [20], note: null}
+
+input:
+  relay:
+    type: object
+    qos: 1
+    variants:
+      reset: {}
+      set:
+        enabled: {type: bool}
+      pulse:
+        duration: {type: int, min: 1, max: 60000, unit: ms}
+      sequence:
+        steps:
+          type: array
+          min_items: 1
+          items:
+            type: object
+            variants:
+              wait:
+                duration: {type: int, min: 1, unit: ms}
+              set:
+                enabled: {type: bool}
+    example:
+      action: sequence
+      steps:
+        - {action: wait, duration: 500}
+        - {action: set, enabled: true}
+
+output:
+  samples:
+    type: array
+    items:
+      type: object
+      fields:
+        source: {type: string, enum: [inside, outside]}
+        values:
+          type: array
+          items: {type: float, min: -55, max: 125, unit: Cel}
+    example:
+      - {source: inside, values: [21, 22.5]}
+  event:
+    type: object
+    fields:
+      data: {type: any, max_bytes: 2048}
+      context: {type: object, extra: true}
+    example: {data: null, context: {source: sensor}}

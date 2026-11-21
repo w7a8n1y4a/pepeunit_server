@@ -28,9 +28,9 @@ class FieldDeclaration(TypedDict, total=False):
     description: str
     example: JsonValue
     default: JsonValue
-    fields: dict[str, JsonValue]
-    items: dict[str, JsonValue]
-    variants: dict[str, dict[str, JsonValue]]
+    fields: dict[str, FieldDeclaration]
+    items: FieldDeclaration
+    variants: dict[str, dict[str, FieldDeclaration]]
     routing: str
 
 
@@ -100,7 +100,10 @@ class UnitDefinition(ManifestContractHeader):
     ) -> None:
         if "base" in field:
             self.require_field(
-                path[0] != "env" and bool(field["base"]) and len(field) == 1,
+                len(path) == 2
+                and path[0] != "env"
+                and bool(field["base"])
+                and len(field) == 1,
                 path,
                 "A base declaration must contain only a non-empty base in Input or Output",
             )
@@ -110,6 +113,11 @@ class UnitDefinition(ManifestContractHeader):
         )
         kind = field["type"]
         self.require_choice(kind, dictionary.types, (*path, "type"))
+        self.require_field(
+            len(path) == 2 or kind != "bytes",
+            (*path, "type"),
+            "Raw bytes cannot be nested in a JSON value",
+        )
         allowed = {
             "min": ("int", "float"),
             "max": ("int", "float"),
@@ -154,7 +162,35 @@ class UnitDefinition(ManifestContractHeader):
                 "variants forbid extra fields",
             )
         self.validate_transport(field, dictionary, path)
+        self.validate_nested(field, dictionary, path)
         self.validate_literals(field, path)
+
+    def validate_nested(
+        self,
+        field: FieldDeclaration,
+        dictionary: ManifestDictionary,
+        path: tuple[str | int, ...],
+    ) -> None:
+        for name, child in field.get("fields", {}).items():
+            self.validate_field(child, dictionary, (*path, "fields", name))
+        if "items" in field:
+            self.validate_field(field["items"], dictionary, (*path, "items"))
+        if "variants" not in field:
+            return
+        self.require_field(
+            bool(field["variants"]),
+            (*path, "variants"),
+            "Variants must not be empty",
+        )
+        for variant, declarations in field["variants"].items():
+            variant_path = (*path, "variants", variant)
+            self.require_field(
+                "action" not in declarations,
+                (*variant_path, "action"),
+                "The action field is defined by variants",
+            )
+            for name, child in declarations.items():
+                self.validate_field(child, dictionary, (*variant_path, name))
 
     def validate_literals(
         self, field: FieldDeclaration, path: tuple[str | int, ...]
@@ -176,12 +212,6 @@ class UnitDefinition(ManifestContractHeader):
                 continue
             value = field[key]
             self.validate_literal(field, value, (*path, key))
-            if value is not None and "enum" in field:
-                self.require_field(
-                    value in field["enum"],
-                    (*path, key),
-                    "Value must belong to enum",
-                )
 
     def validate_limits(
         self, field: FieldDeclaration, path: tuple[str | int, ...]
@@ -222,9 +252,9 @@ class UnitDefinition(ManifestContractHeader):
         for key in ("codec", "qos", "routing"):
             if key in field:
                 self.require_field(
-                    path[0] in ("input", "output"),
+                    len(path) == 2 and path[0] in ("input", "output"),
                     (*path, key),
-                    "Transport options are only allowed on Input or Output",
+                    "Transport options are only allowed on top-level Input or Output",
                 )
         kind = field["type"]
         codec = field.get(
@@ -295,6 +325,11 @@ class UnitDefinition(ManifestContractHeader):
             path,
             "Value does not match the declared type",
         )
+        if value is not None and "enum" in field:
+            self.require_field(
+                value in field["enum"], path, "Value must belong to enum"
+            )
+        self.validate_nested_literal(field, value, path)
         if type(value) in (int, float):
             self.require_field(
                 not isinstance(value, float) or isfinite(value),
@@ -343,6 +378,45 @@ class UnitDefinition(ManifestContractHeader):
                 uuid_pkg.UUID(value)
             except ValueError:
                 self.require_field(False, path, "Value must be a UUID")
+
+    def validate_nested_literal(
+        self,
+        field: FieldDeclaration,
+        value: JsonValue,
+        path: tuple[str | int, ...],
+    ) -> None:
+        if field["type"] == "array":
+            for index, item in enumerate(value):
+                self.validate_literal(field["items"], item, (*path, index))
+            return
+        if field["type"] != "object":
+            return
+        declarations = field.get("fields", {})
+        if "variants" in field:
+            action = value.get("action")
+            self.require_field(
+                isinstance(action, str) and action in field["variants"],
+                (*path, "action"),
+                "Action must select a declared variant",
+            )
+            declarations = field["variants"][action]
+        for name, child in declarations.items():
+            if name not in value:
+                self.require_field(
+                    child.get("optional", False),
+                    (*path, name),
+                    "Required field is missing",
+                )
+                continue
+            self.validate_literal(child, value[name], (*path, name))
+        for name in value:
+            if name == "action" and "variants" in field:
+                continue
+            self.require_field(
+                name in declarations or field.get("extra", False),
+                (*path, name),
+                "Unexpected field",
+            )
 
     @classmethod
     def require_field(

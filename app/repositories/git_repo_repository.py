@@ -1,12 +1,12 @@
 import contextlib
-import io
 import os
 import shutil
 import uuid as uuid_pkg
 from collections import Counter
 
+from git import Blob
 from git import Repo as GitRepo
-from git.exc import GitCommandError
+from git.exc import BadName, BadObject, GitCommandError
 
 from app import runtime, settings
 from app.configs.error_codes import ErrorCode
@@ -417,40 +417,45 @@ class GitRepoRepository:
             msg = "Commit {} without Tag".format(target["commit"])
             raise GitRepoError(msg, code=ErrorCode.GIT_REPO_COMMIT_WITHOUT_TAG)
 
-    def get_file(self, repo: Repo, commit: str, path: str) -> io.BytesIO:
-        repo = self.get_repo(repo)
-
-        if commit is None:
+    def get_file_bytes(self, repo: Repo, commit: str, path: str) -> bytes:
+        if not commit:
             msg = "Commit not found"
             raise GitRepoError(msg, code=ErrorCode.GIT_REPO_COMMIT_NOT_FOUND)
 
+        git_repo = self.get_repo(repo)
         try:
-            target_file = repo.commit(commit).tree / path
+            tree = git_repo.commit(commit).tree
+        except (BadName, BadObject, ValueError) as err:
+            msg = f"Commit {commit} not found"
+            raise GitRepoError(
+                msg, code=ErrorCode.GIT_REPO_COMMIT_NOT_FOUND
+            ) from err
+
+        try:
+            target_file = tree / path
         except KeyError as err:
             msg = f"File {path} not found in repo commit {commit}"
             raise GitRepoError(
                 msg, code=ErrorCode.GIT_REPO_FILE_NOT_FOUND
             ) from err
 
-        buffer = io.BytesIO()
-        target_file.stream_data(buffer)
-        return buffer
+        if not isinstance(target_file, Blob):
+            msg = f"Expected a file at {path} in repo commit {commit}"
+            raise GitRepoError(msg, code=ErrorCode.GIT_REPO_FILE_NOT_FOUND)
+
+        return target_file.data_stream.read()
 
     def get_schema_dict(self, repo: Repo, commit: str) -> dict:
-        target_file = StaticRepoFileName.SCHEMA_EXAMPLE.value
-        schema_buffer = self.get_file(repo, commit, target_file)
-        return is_valid_json(
-            schema_buffer.getvalue().decode(),
-            JsonPayload.SCHEMA_EXAMPLE,
+        content = self.get_file_bytes(
+            repo, commit, StaticRepoFileName.SCHEMA_EXAMPLE.value
         )
+        return is_valid_json(content.decode(), JsonPayload.SCHEMA_EXAMPLE)
 
     def get_env_dict(self, repo: Repo, commit: str) -> dict:
-        target_file = StaticRepoFileName.ENV_EXAMPLE.value
-        schema_buffer = self.get_file(repo, commit, target_file)
-        return is_valid_json(
-            schema_buffer.getvalue().decode(),
-            JsonPayload.ENV_EXAMPLE,
+        content = self.get_file_bytes(
+            repo, commit, StaticRepoFileName.ENV_EXAMPLE.value
         )
+        return is_valid_json(content.decode(), JsonPayload.ENV_EXAMPLE)
 
     def get_env_example(self, repo: Repo, commit: str) -> dict:
         is_valid_object(commit, NotFoundEntity.COMMIT)

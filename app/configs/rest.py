@@ -40,6 +40,7 @@ from app.repositories.unit_group_unit_repository import (
 )
 from app.repositories.unit_io_repository import UnitIORepository
 from app.repositories.unit_log_repository import UnitLogRepository
+from app.repositories.unit_manifest_repository import UnitManifestRepository
 from app.repositories.unit_repository import UnitRepository
 from app.repositories.user_repository import UserRepository
 from app.services.access_service import AccessService
@@ -54,6 +55,7 @@ from app.services.permission_service import PermissionService
 from app.services.repo_service import RepoService
 from app.services.unit_group_service import UnitGroupService
 from app.services.unit_io_service import UnitIOService
+from app.services.unit_manifest_service import UnitManifestService
 from app.services.unit_service import UnitService
 from app.services.user_service import UserService
 from app.services.utils import token_depends
@@ -180,6 +182,9 @@ class ServiceFactory:
             permission_service=self.permission_service,
             access_service=self.access_service,
         )
+
+    def get_unit_manifest_service(self) -> UnitManifestService:
+        return UnitManifestService(UnitManifestRepository())
 
     def get_unit_service(self) -> UnitService:
         return UnitService(

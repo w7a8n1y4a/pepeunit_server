@@ -160,11 +160,20 @@ class GlobalPrefixTopic(str, enum.Enum):
     )
 
 
+class SchemaFileName(str, enum.Enum):
+    DICTIONARY = "dictionary.yml"
+
+
+class ManifestContractVersion(str, enum.Enum):
+    V1 = "v1"
+
+
 class StaticRepoFileName(str, enum.Enum):
     """
     Static files
     """
 
+    UNIT_MANIFEST = "unit.yml"
     SCHEMA_EXAMPLE = "schema_example.json"
     SCHEMA = "schema.json"
     ENV_EXAMPLE = "env_example.json"

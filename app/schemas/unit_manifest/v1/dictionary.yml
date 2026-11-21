@@ -1,4 +1,4 @@
-version: 1
+contract_version: v1
 
 unit_types: [sensor, actor, controller, observer, gateway]
 execution_types: [interpreted, compiled]

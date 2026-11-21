@@ -1,0 +1,22 @@
+contract_version: v1
+
+search:
+  type: sensor
+  execution_type: compiled
+  name: room-thermometer
+  platforms: [esp32, esp32c3]
+  description: Measures room temperature once per minute.
+
+docs:
+  algorithm: |
+    Sample the probe and publish the temperature in degrees Celsius.
+  installation: Connect the external probe to the GPIO selected by PROBE_PIN.
+
+env:
+  PROBE_PIN: {type: int, min: 0, example: 4}
+
+input:
+  reset: {base: reset}
+
+output:
+  temperature: {type: float, unit: Cel}

@@ -11,4 +11,5 @@ class UnitManifestService:
     def parse(self, content: str | bytes) -> UnitDefinition:
         unit, dictionary = self.unit_manifest_repository.read_manifest(content)
         unit.validate_search(dictionary)
+        unit.validate_fields(dictionary)
         return unit

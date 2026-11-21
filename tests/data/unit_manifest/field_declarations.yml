@@ -1,0 +1,54 @@
+contract_version: v1
+
+search:
+  type: gateway
+  execution_type: interpreted
+  name: typed-gateway
+  platforms: [linux]
+  description: Demonstrates field constraints and MQTT payload encodings.
+
+env:
+  ENABLED: {type: bool, default: true}
+  RETRIES: {type: int, min: 0, max: 5, default: 3, example: 0}
+  LABEL: {type: string, max_bytes: 16, nullable: true, default: null}
+  TOKEN: {type: string, max_bytes: 128, secret: true}
+
+input:
+  reset: {base: reset}
+  target:
+    type: string
+    format: uuid
+    max_bytes: 36
+    qos: 1
+    example: 2d98b4ba-c935-4379-8e1a-520e76018c17
+  button:
+    type: string
+    codec: utf8
+    enum: [Left, Right]
+    max_bytes: 5
+    qos: 0
+    example: Left
+
+output:
+  temperature: {type: float, min: -55, max: 125, unit: Cel}
+  packet: {type: bytes, max_bytes: 220}
+  raw_packet: {type: bytes, codec: raw, max_bytes: 220, qos: 1}
+  anything: {type: any, max_bytes: 2048}
+  readings:
+    type: array
+    items: {type: float, unit: Cel}
+    min_items: 0
+    max_items: 16
+  event:
+    type: object
+    codec: json
+    qos: 1
+    fields:
+      kind: {type: string, max_bytes: 16}
+  command:
+    type: object
+    routing: selected-link
+    qos: 1
+    fields:
+      input_uuid: {type: string, format: uuid, max_bytes: 36}
+      data: {type: any, max_bytes: 2048}

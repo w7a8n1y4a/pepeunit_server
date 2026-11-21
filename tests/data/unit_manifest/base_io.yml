@@ -1,0 +1,21 @@
+version: 1
+
+search:
+  type: sensor
+  execution_type: interpreted
+  name: system-status
+  platforms: [linux]
+  description: Reports device state and logs and accepts the standard service commands.
+
+docs: {}
+env: {}
+
+input:
+  update: {base: update}
+  env_update: {base: env_update}
+  schema_update: {base: schema_update}
+  log_sync: {base: log_sync}
+  reset: {base: reset}
+output:
+  state: {base: state}
+  log: {base: log}

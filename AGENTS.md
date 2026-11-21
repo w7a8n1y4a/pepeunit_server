@@ -22,6 +22,13 @@
 - Write identifiers and error messages in English. Use `snake_case` for
   modules, methods, and fields, `PascalCase` for classes, and
   `UPPER_SNAKE_CASE` for constants.
+- Hardcoded domain and protocol keys, enum-like values, statuses, commands,
+  and meaningful numeric limits are forbidden in application logic. Reuse
+  existing enums from `app/dto/enum.py`; add a scoped enum there when missing.
+  Prefer typed model attributes over string dictionary keys. Define wire
+  literals once in enums or typed schema declarations and reuse those types.
+  Keep contract defaults in the selected versioned dictionary, not in code.
+  Review size is not an exception to this rule.
 - Annotate parameters and return values. Use `list[T]`, `dict[K, V]`, and
   `T | None`. Type entity UUIDs as `uuid_pkg.UUID` with `import uuid as uuid_pkg`.
   Use `datetime.now(UTC)` for the current time.

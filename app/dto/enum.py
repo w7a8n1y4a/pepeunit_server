@@ -168,6 +168,70 @@ class ManifestContractVersion(str, enum.Enum):
     V1 = "v1"
 
 
+class FieldKey(str, enum.Enum):
+    SEARCH = "search"
+    TYPE = "type"
+    EXECUTION_TYPE = "execution_type"
+    PLATFORMS = "platforms"
+    CONTRACT_VERSION = "contract_version"
+    ENV = "env"
+    INPUT = "input"
+    OUTPUT = "output"
+    BASE = "base"
+    OPTIONAL = "optional"
+    NULLABLE = "nullable"
+    EXTRA = "extra"
+    CODEC = "codec"
+    QOS = "qos"
+    ROUTING = "routing"
+    FIELDS = "fields"
+    ITEMS = "items"
+    VARIANTS = "variants"
+    MIN = "min"
+    MAX = "max"
+    UNIT = "unit"
+    MAX_BYTES = "max_bytes"
+    MIN_ITEMS = "min_items"
+    MAX_ITEMS = "max_items"
+    FORMAT = "format"
+    ENUM = "enum"
+    ACTION = "action"
+    DEFAULT = "default"
+    EXAMPLE = "example"
+    SECRET = "secret"
+
+
+class FieldType(str, enum.Enum):
+    BOOL = "bool"
+    INT = "int"
+    FLOAT = "float"
+    STRING = "string"
+    OBJECT = "object"
+    ARRAY = "array"
+    ANY = "any"
+    BYTES = "bytes"
+
+
+class PayloadCodec(str, enum.Enum):
+    JSON = "json"
+    UTF8 = "utf8"
+    RAW = "raw"
+
+
+class OutputRouting(str, enum.Enum):
+    BROADCAST = "broadcast"
+    SELECTED_LINK = "selected-link"
+
+
+class FieldFormat(str, enum.Enum):
+    UUID = "uuid"
+
+
+class MqttQos(int, enum.Enum):
+    AT_MOST_ONCE = 0
+    AT_LEAST_ONCE = 1
+
+
 class StaticRepoFileName(str, enum.Enum):
     """
     Static files

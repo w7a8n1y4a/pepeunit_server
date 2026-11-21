@@ -1,11 +1,21 @@
 import json
 import uuid as uuid_pkg
 from collections.abc import Collection
+from copy import deepcopy
 from math import isfinite
 from typing import NotRequired, TypedDict
 
 from pydantic import BaseModel, Field, JsonValue, ValidationError
 from pydantic_core import InitErrorDetails
+
+from app.dto.enum import (
+    FieldFormat,
+    FieldKey,
+    FieldType,
+    MqttQos,
+    OutputRouting,
+    PayloadCodec,
+)
 
 
 class FieldDeclaration(TypedDict, total=False):
@@ -75,20 +85,80 @@ class UnitDefinition(ManifestContractHeader):
 
     def validate_search(self, dictionary: ManifestDictionary) -> None:
         self.require_choice(
-            self.search.type, dictionary.unit_types, ("search", "type")
+            self.search.type,
+            dictionary.unit_types,
+            (FieldKey.SEARCH, FieldKey.TYPE),
         )
         self.require_choice(
             self.search.execution_type,
             dictionary.execution_types,
-            ("search", "execution_type"),
+            (FieldKey.SEARCH, FieldKey.EXECUTION_TYPE),
         )
         for index, platform in enumerate(self.search.platforms):
             self.require_choice(
-                platform, dictionary.platforms, ("search", "platforms", index)
+                platform,
+                dictionary.platforms,
+                (FieldKey.SEARCH, FieldKey.PLATFORMS, index),
             )
 
+    def resolve_fields(self, dictionary: ManifestDictionary) -> None:
+        for section in (FieldKey.ENV, FieldKey.INPUT, FieldKey.OUTPUT):
+            declarations = getattr(self, section)
+            for name in declarations:
+                field = declarations[name]
+                if FieldKey.BASE in field:
+                    path = (section, name, FieldKey.BASE)
+                    self.require_field(
+                        section != FieldKey.ENV
+                        and len(field) == 1
+                        and bool(field[FieldKey.BASE]),
+                        path,
+                        "A base declaration must contain only a non-empty base in Input or Output",
+                    )
+                    definitions = getattr(dictionary, section)
+                    self.require_choice(
+                        field[FieldKey.BASE], definitions, path
+                    )
+                    base = field[FieldKey.BASE]
+                    field = deepcopy(definitions[base])
+                    field[FieldKey.BASE] = base
+                    declarations[name] = field
+                self.apply_field_defaults(field, dictionary, section)
+
+    def apply_field_defaults(
+        self,
+        field: FieldDeclaration,
+        dictionary: ManifestDictionary,
+        section: FieldKey | None = None,
+    ) -> None:
+        for key in (FieldKey.OPTIONAL, FieldKey.NULLABLE):
+            field.setdefault(key, dictionary.defaults[key])
+        if field.get(FieldKey.TYPE) == FieldType.OBJECT:
+            field.setdefault(
+                FieldKey.EXTRA, dictionary.defaults[FieldKey.EXTRA]
+            )
+        if section in (FieldKey.INPUT, FieldKey.OUTPUT):
+            field.setdefault(
+                FieldKey.CODEC,
+                PayloadCodec.RAW
+                if field.get(FieldKey.TYPE) == FieldType.BYTES
+                else dictionary.defaults[FieldKey.CODEC],
+            )
+            field.setdefault(FieldKey.QOS, dictionary.defaults[FieldKey.QOS])
+        if section == FieldKey.OUTPUT:
+            field.setdefault(
+                FieldKey.ROUTING, dictionary.defaults[FieldKey.ROUTING]
+            )
+        for child in field.get(FieldKey.FIELDS, {}).values():
+            self.apply_field_defaults(child, dictionary)
+        if FieldKey.ITEMS in field:
+            self.apply_field_defaults(field[FieldKey.ITEMS], dictionary)
+        for declarations in field.get(FieldKey.VARIANTS, {}).values():
+            for child in declarations.values():
+                self.apply_field_defaults(child, dictionary)
+
     def validate_fields(self, dictionary: ManifestDictionary) -> None:
-        for section in ("env", "input", "output"):
+        for section in (FieldKey.ENV, FieldKey.INPUT, FieldKey.OUTPUT):
             for name, declaration in getattr(self, section).items():
                 self.validate_field(declaration, dictionary, (section, name))
 
@@ -98,39 +168,46 @@ class UnitDefinition(ManifestContractHeader):
         dictionary: ManifestDictionary,
         path: tuple[str | int, ...],
     ) -> None:
-        if "base" in field:
+        if FieldKey.BASE in field:
             self.require_field(
                 len(path) == 2
-                and path[0] != "env"
-                and bool(field["base"])
-                and len(field) == 1,
+                and path[0] != FieldKey.ENV
+                and bool(field[FieldKey.BASE]),
                 path,
-                "A base declaration must contain only a non-empty base in Input or Output",
+                "A base identifier is only allowed on top-level Input or Output",
             )
-            return
         self.require_field(
-            "type" in field, (*path, "type"), "Type is required"
+            FieldKey.TYPE in field, (*path, FieldKey.TYPE), "Type is required"
         )
-        kind = field["type"]
-        self.require_choice(kind, dictionary.types, (*path, "type"))
+        kind = field[FieldKey.TYPE]
+        self.require_choice(kind, dictionary.types, (*path, FieldKey.TYPE))
         self.require_field(
-            len(path) == 2 or kind != "bytes",
-            (*path, "type"),
+            len(path) == 2 or kind != FieldType.BYTES,
+            (*path, FieldKey.TYPE),
             "Raw bytes cannot be nested in a JSON value",
         )
         allowed = {
-            "min": ("int", "float"),
-            "max": ("int", "float"),
-            "unit": ("int", "float"),
-            "max_bytes": ("string", "any", "bytes"),
-            "min_items": ("array",),
-            "max_items": ("array",),
-            "items": ("array",),
-            "fields": ("object",),
-            "variants": ("object",),
-            "extra": ("object",),
-            "format": ("string",),
-            "enum": ("bool", "int", "float", "string"),
+            FieldKey.MIN: (FieldType.INT, FieldType.FLOAT),
+            FieldKey.MAX: (FieldType.INT, FieldType.FLOAT),
+            FieldKey.UNIT: (FieldType.INT, FieldType.FLOAT),
+            FieldKey.MAX_BYTES: (
+                FieldType.STRING,
+                FieldType.ANY,
+                FieldType.BYTES,
+            ),
+            FieldKey.MIN_ITEMS: (FieldType.ARRAY,),
+            FieldKey.MAX_ITEMS: (FieldType.ARRAY,),
+            FieldKey.ITEMS: (FieldType.ARRAY,),
+            FieldKey.FIELDS: (FieldType.OBJECT,),
+            FieldKey.VARIANTS: (FieldType.OBJECT,),
+            FieldKey.EXTRA: (FieldType.OBJECT,),
+            FieldKey.FORMAT: (FieldType.STRING,),
+            FieldKey.ENUM: (
+                FieldType.BOOL,
+                FieldType.INT,
+                FieldType.FLOAT,
+                FieldType.STRING,
+            ),
         }
         for key, kinds in allowed.items():
             if key in field:
@@ -138,27 +215,33 @@ class UnitDefinition(ManifestContractHeader):
                     kind in kinds, (*path, key), f"Not allowed for type {kind}"
                 )
         self.validate_limits(field, path)
-        if "unit" in field:
+        if FieldKey.UNIT in field:
             self.require_field(
-                bool(field["unit"].strip()), (*path, "unit"), "Unit is empty"
+                bool(field[FieldKey.UNIT].strip()),
+                (*path, FieldKey.UNIT),
+                "Unit is empty",
             )
-        if "format" in field:
+        if FieldKey.FORMAT in field:
             self.require_choice(
-                field["format"], dictionary.formats, (*path, "format")
+                field[FieldKey.FORMAT],
+                dictionary.formats,
+                (*path, FieldKey.FORMAT),
             )
-        if kind == "array":
+        if kind == FieldType.ARRAY:
             self.require_field(
-                "items" in field, (*path, "items"), "Array items are required"
+                FieldKey.ITEMS in field,
+                (*path, FieldKey.ITEMS),
+                "Array items are required",
             )
-        if kind == "object":
+        if kind == FieldType.OBJECT:
             self.require_field(
-                not ("fields" in field and "variants" in field),
+                not (FieldKey.FIELDS in field and FieldKey.VARIANTS in field),
                 path,
                 "fields and variants are mutually exclusive",
             )
             self.require_field(
-                "variants" not in field or not field.get("extra", False),
-                (*path, "extra"),
+                FieldKey.VARIANTS not in field or not field[FieldKey.EXTRA],
+                (*path, FieldKey.EXTRA),
                 "variants forbid extra fields",
             )
         self.validate_transport(field, dictionary, path)
@@ -171,22 +254,26 @@ class UnitDefinition(ManifestContractHeader):
         dictionary: ManifestDictionary,
         path: tuple[str | int, ...],
     ) -> None:
-        for name, child in field.get("fields", {}).items():
-            self.validate_field(child, dictionary, (*path, "fields", name))
-        if "items" in field:
-            self.validate_field(field["items"], dictionary, (*path, "items"))
-        if "variants" not in field:
+        for name, child in field.get(FieldKey.FIELDS, {}).items():
+            self.validate_field(
+                child, dictionary, (*path, FieldKey.FIELDS, name)
+            )
+        if FieldKey.ITEMS in field:
+            self.validate_field(
+                field[FieldKey.ITEMS], dictionary, (*path, FieldKey.ITEMS)
+            )
+        if FieldKey.VARIANTS not in field:
             return
         self.require_field(
-            bool(field["variants"]),
-            (*path, "variants"),
+            bool(field[FieldKey.VARIANTS]),
+            (*path, FieldKey.VARIANTS),
             "Variants must not be empty",
         )
-        for variant, declarations in field["variants"].items():
-            variant_path = (*path, "variants", variant)
+        for variant, declarations in field[FieldKey.VARIANTS].items():
+            variant_path = (*path, FieldKey.VARIANTS, variant)
             self.require_field(
-                "action" not in declarations,
-                (*variant_path, "action"),
+                FieldKey.ACTION not in declarations,
+                (*variant_path, FieldKey.ACTION),
                 "The action field is defined by variants",
             )
             for name, child in declarations.items():
@@ -195,19 +282,21 @@ class UnitDefinition(ManifestContractHeader):
     def validate_literals(
         self, field: FieldDeclaration, path: tuple[str | int, ...]
     ) -> None:
-        if "enum" in field:
-            values = field["enum"]
+        if FieldKey.ENUM in field:
+            values = field[FieldKey.ENUM]
             self.require_field(
-                bool(values), (*path, "enum"), "Enum must not be empty"
+                bool(values), (*path, FieldKey.ENUM), "Enum must not be empty"
             )
             for index, value in enumerate(values):
-                self.validate_literal(field, value, (*path, "enum", index))
+                self.validate_literal(
+                    field, value, (*path, FieldKey.ENUM, index)
+                )
                 self.require_field(
                     value not in values[:index],
-                    (*path, "enum", index),
+                    (*path, FieldKey.ENUM, index),
                     "Enum values must be unique",
                 )
-        for key in ("default", "example"):
+        for key in (FieldKey.DEFAULT, FieldKey.EXAMPLE):
             if key not in field:
                 continue
             value = field[key]
@@ -216,7 +305,7 @@ class UnitDefinition(ManifestContractHeader):
     def validate_limits(
         self, field: FieldDeclaration, path: tuple[str | int, ...]
     ) -> None:
-        for key in ("min", "max"):
+        for key in (FieldKey.MIN, FieldKey.MAX):
             if key not in field:
                 continue
             bound = field[key]
@@ -226,16 +315,23 @@ class UnitDefinition(ManifestContractHeader):
                 "Numeric limits must be finite",
             )
             self.require_field(
-                field["type"] != "int" or type(bound) is int,
+                field[FieldKey.TYPE] != FieldType.INT or type(bound) is int,
                 (*path, key),
                 "Integer limits must be integers",
             )
-        for key in ("max_bytes", "min_items", "max_items"):
+        for key in (
+            FieldKey.MAX_BYTES,
+            FieldKey.MIN_ITEMS,
+            FieldKey.MAX_ITEMS,
+        ):
             if key in field:
                 self.require_field(
                     field[key] >= 0, (*path, key), "Limit must be non-negative"
                 )
-        for lower, upper in (("min", "max"), ("min_items", "max_items")):
+        for lower, upper in (
+            (FieldKey.MIN, FieldKey.MAX),
+            (FieldKey.MIN_ITEMS, FieldKey.MAX_ITEMS),
+        ):
             if lower in field and upper in field:
                 self.require_field(
                     field[lower] <= field[upper],
@@ -249,51 +345,56 @@ class UnitDefinition(ManifestContractHeader):
         dictionary: ManifestDictionary,
         path: tuple[str | int, ...],
     ) -> None:
-        for key in ("codec", "qos", "routing"):
+        for key in (FieldKey.CODEC, FieldKey.QOS, FieldKey.ROUTING):
             if key in field:
                 self.require_field(
-                    len(path) == 2 and path[0] in ("input", "output"),
+                    len(path) == 2
+                    and path[0] in (FieldKey.INPUT, FieldKey.OUTPUT),
                     (*path, key),
                     "Transport options are only allowed on top-level Input or Output",
                 )
-        kind = field["type"]
-        codec = field.get(
-            "codec", "raw" if kind == "bytes" else dictionary.defaults["codec"]
-        )
+        kind = field[FieldKey.TYPE]
+        codec = field.get(FieldKey.CODEC, PayloadCodec.JSON)
         self.require_field(
-            (codec == "json" and kind != "bytes")
-            or (codec == "utf8" and kind == "string")
-            or (codec == "raw" and kind == "bytes"),
-            (*path, "codec"),
+            (codec == PayloadCodec.JSON and kind != FieldType.BYTES)
+            or (codec == PayloadCodec.UTF8 and kind == FieldType.STRING)
+            or (codec == PayloadCodec.RAW and kind == FieldType.BYTES),
+            (*path, FieldKey.CODEC),
             "Codec does not support this type",
         )
         self.require_field(
-            codec == "json" or not field.get("nullable", False),
-            (*path, "nullable"),
+            codec == PayloadCodec.JSON or not field[FieldKey.NULLABLE],
+            (*path, FieldKey.NULLABLE),
             "Nullable values require the JSON codec",
         )
-        if "qos" in field:
+        if FieldKey.QOS in field:
             self.require_field(
-                field["qos"] in (0, 1), (*path, "qos"), "QoS must be 0 or 1"
+                field[FieldKey.QOS] in MqttQos,
+                (*path, FieldKey.QOS),
+                "QoS must be 0 or 1",
             )
-        if "routing" in field:
+        if FieldKey.ROUTING in field:
             self.require_field(
-                path[0] == "output",
-                (*path, "routing"),
+                path[0] == FieldKey.OUTPUT,
+                (*path, FieldKey.ROUTING),
                 "Routing is Output-only",
             )
             self.require_choice(
-                field["routing"], dictionary.routing, (*path, "routing")
+                field[FieldKey.ROUTING],
+                dictionary.routing,
+                (*path, FieldKey.ROUTING),
             )
             self.require_field(
-                field["routing"] != "selected-link"
-                or (kind == "object" and codec == "json"),
-                (*path, "routing"),
+                field[FieldKey.ROUTING] != OutputRouting.SELECTED_LINK
+                or (kind == FieldType.OBJECT and codec == PayloadCodec.JSON),
+                (*path, FieldKey.ROUTING),
                 "selected-link requires a JSON object",
             )
-        if "secret" in field:
+        if FieldKey.SECRET in field:
             self.require_field(
-                path[0] == "env", (*path, "secret"), "Secret is env-only"
+                path[0] == FieldKey.ENV,
+                (*path, FieldKey.SECRET),
+                "Secret is env-only",
             )
 
     def validate_literal(
@@ -302,32 +403,34 @@ class UnitDefinition(ManifestContractHeader):
         value: JsonValue,
         path: tuple[str | int, ...],
     ) -> None:
-        kind = field["type"]
+        kind = field[FieldKey.TYPE]
         if value is None:
             self.require_field(
-                kind == "any" or field.get("nullable", False),
+                kind == FieldType.ANY or field[FieldKey.NULLABLE],
                 path,
                 "Null requires nullable: true",
             )
-            if kind != "any":
+            if kind != FieldType.ANY:
                 return
         types = {
-            "bool": (bool,),
-            "int": (int,),
-            "float": (int, float),
-            "string": (str,),
-            "object": (dict,),
-            "array": (list,),
-            "bytes": (),
+            FieldType.BOOL: (bool,),
+            FieldType.INT: (int,),
+            FieldType.FLOAT: (int, float),
+            FieldType.STRING: (str,),
+            FieldType.OBJECT: (dict,),
+            FieldType.ARRAY: (list,),
+            FieldType.BYTES: (),
         }
         self.require_field(
-            kind == "any" or type(value) in types.get(kind, ()),
+            kind == FieldType.ANY or type(value) in types.get(kind, ()),
             path,
             "Value does not match the declared type",
         )
-        if value is not None and "enum" in field:
+        if value is not None and FieldKey.ENUM in field:
             self.require_field(
-                value in field["enum"], path, "Value must belong to enum"
+                value in field[FieldKey.ENUM],
+                path,
+                "Value must belong to enum",
             )
         self.validate_nested_literal(field, value, path)
         if type(value) in (int, float):
@@ -337,22 +440,26 @@ class UnitDefinition(ManifestContractHeader):
                 "Numeric values must be finite",
             )
             self.require_field(
-                ("min" not in field or value >= field["min"])
-                and ("max" not in field or value <= field["max"]),
+                (FieldKey.MIN not in field or value >= field[FieldKey.MIN])
+                and (
+                    FieldKey.MAX not in field or value <= field[FieldKey.MAX]
+                ),
                 path,
                 "Value is outside numeric limits",
             )
         if isinstance(value, list):
             self.require_field(
-                len(value) >= field.get("min_items", 0)
+                len(value) >= field.get(FieldKey.MIN_ITEMS, 0)
                 and (
-                    "max_items" not in field
-                    or len(value) <= field["max_items"]
+                    FieldKey.MAX_ITEMS not in field
+                    or len(value) <= field[FieldKey.MAX_ITEMS]
                 ),
                 path,
                 "Value is outside item limits",
             )
-        if "max_bytes" in field and (kind == "any" or isinstance(value, str)):
+        if FieldKey.MAX_BYTES in field and (
+            kind == FieldType.ANY or isinstance(value, str)
+        ):
             try:
                 text = (
                     json.dumps(
@@ -361,7 +468,7 @@ class UnitDefinition(ManifestContractHeader):
                         allow_nan=False,
                         separators=(",", ":"),
                     )
-                    if kind == "any"
+                    if kind == FieldType.ANY
                     else value
                 )
                 size = len(text.encode("utf-8"))
@@ -369,11 +476,11 @@ class UnitDefinition(ManifestContractHeader):
                 self.require_field(False, path, "Value cannot be encoded")
                 return
             self.require_field(
-                size <= field["max_bytes"],
+                size <= field[FieldKey.MAX_BYTES],
                 path,
                 "Value exceeds max_bytes",
             )
-        if field.get("format") == "uuid":
+        if field.get(FieldKey.FORMAT) == FieldFormat.UUID:
             try:
                 uuid_pkg.UUID(value)
             except ValueError:
@@ -385,35 +492,37 @@ class UnitDefinition(ManifestContractHeader):
         value: JsonValue,
         path: tuple[str | int, ...],
     ) -> None:
-        if field["type"] == "array":
+        if field[FieldKey.TYPE] == FieldType.ARRAY:
             for index, item in enumerate(value):
-                self.validate_literal(field["items"], item, (*path, index))
+                self.validate_literal(
+                    field[FieldKey.ITEMS], item, (*path, index)
+                )
             return
-        if field["type"] != "object":
+        if field[FieldKey.TYPE] != FieldType.OBJECT:
             return
-        declarations = field.get("fields", {})
-        if "variants" in field:
-            action = value.get("action")
+        declarations = field.get(FieldKey.FIELDS, {})
+        if FieldKey.VARIANTS in field:
+            action = value.get(FieldKey.ACTION)
             self.require_field(
-                isinstance(action, str) and action in field["variants"],
-                (*path, "action"),
+                isinstance(action, str) and action in field[FieldKey.VARIANTS],
+                (*path, FieldKey.ACTION),
                 "Action must select a declared variant",
             )
-            declarations = field["variants"][action]
+            declarations = field[FieldKey.VARIANTS][action]
         for name, child in declarations.items():
             if name not in value:
                 self.require_field(
-                    child.get("optional", False),
+                    child[FieldKey.OPTIONAL],
                     (*path, name),
                     "Required field is missing",
                 )
                 continue
             self.validate_literal(child, value[name], (*path, name))
         for name in value:
-            if name == "action" and "variants" in field:
+            if name == FieldKey.ACTION and FieldKey.VARIANTS in field:
                 continue
             self.require_field(
-                name in declarations or field.get("extra", False),
+                name in declarations or field[FieldKey.EXTRA],
                 (*path, name),
                 "Unexpected field",
             )
@@ -453,6 +562,15 @@ class MeasurementStandard(BaseModel):
     version: str
 
 
+class ManifestDefaults(TypedDict):
+    codec: str
+    optional: bool
+    nullable: bool
+    extra: bool
+    routing: str
+    qos: int
+
+
 class ManifestDictionary(ManifestContractHeader):
     unit_types: list[str]
     execution_types: list[str]
@@ -464,4 +582,4 @@ class ManifestDictionary(ManifestContractHeader):
     env: FieldDeclarations
     input: FieldDeclarations
     output: FieldDeclarations
-    defaults: dict[str, JsonValue]
+    defaults: ManifestDefaults

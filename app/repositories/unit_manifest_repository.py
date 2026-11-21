@@ -1,6 +1,6 @@
 from importlib.resources import files
 
-from app.dto.enum import ManifestContractVersion, SchemaFileName
+from app.dto.enum import FieldKey, ManifestContractVersion, SchemaFileName
 from app.repositories.base_yaml_repository import BaseYamlRepository
 from app.schemas import unit_manifest
 from app.schemas.pydantic.unit_manifest import (
@@ -23,7 +23,9 @@ class UnitManifestRepository(BaseYamlRepository):
 
     def get_dictionary(self, contract_version: str) -> ManifestDictionary:
         UnitDefinition.require_choice(
-            contract_version, ManifestContractVersion, ("contract_version",)
+            contract_version,
+            ManifestContractVersion,
+            (FieldKey.CONTRACT_VERSION,),
         )
         source = files(unit_manifest).joinpath(
             contract_version, SchemaFileName.DICTIONARY.value

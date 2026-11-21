@@ -12,6 +12,7 @@ from starlette.datastructures import UploadFile
 
 from app import runtime, settings
 from app.configs.clickhouse import get_clickhouse_client
+from app.configs.error_codes import ErrorCode
 from app.configs.errors import (
     CipherError,
     GitRepoError,
@@ -43,7 +44,7 @@ from app.schemas.pydantic.unit import (
     UnitUpdate,
 )
 from app.schemas.pydantic.unit_io import UnitIOFilter
-from app.services.utils import get_topic_name
+from app.services.utils import TomlToMdConverter, get_topic_name
 from app.utils.utils import aes_gcm_encode
 from tests.integration.helpers.http import (
     get_unit_logs_file,
@@ -605,8 +606,14 @@ async def test_convert_toml_file_to_md(regular_user_token, database, cc) -> None
     assert "Parameter | Implementation" in md
     assert "## Files" in md
 
+    maximum = TomlToMdConverter.MAX_SOURCE_CHARACTERS
+    with pytest.raises(ReadmeGenerationError) as failure:
+        await service.convert_toml_file_to_md(
+            upload(b" " * (maximum + 1), "pepeunit.toml")
+        )
+    assert failure.value.error_code == ErrorCode.README_TOML_TOO_LARGE
+
     bad_files = [
-        "bad_size_pepeunit.toml",
         "bad_syntax_pepeunit.toml",
         "bad_general_items_pepeunit.toml",
         "bad_general_text_pepeunit.toml",

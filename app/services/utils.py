@@ -13,6 +13,7 @@ from app import settings
 from app.configs.error_codes import ErrorCode
 from app.configs.errors import ReadmeGenerationError
 from app.dto.enum import GlobalPrefixTopic, VisibilityLevel
+from app.services.readme_markdown import ReadmeMarkdown
 from app.validators.content_size import is_valid_content_size
 
 
@@ -78,10 +79,11 @@ def dict_to_yml_file(yml_dict: dict) -> str:
     return filename
 
 
-class TomlToMdConverter:
+class TomlToMdConverter(ReadmeMarkdown):
     MAX_SOURCE_CHARACTERS = 10000
 
     def __init__(self, data: dict) -> None:
+        super().__init__()
         self.general = data.get("general") or {}
         self.video = data.get("video") or {}
         self.images = data.get("images") or {}
@@ -92,7 +94,6 @@ class TomlToMdConverter:
         self.topic_assignment = data.get("topic_assignment") or {}
         self.work_algorithm = data.get("work_algorithm") or {}
         self.installation = data.get("installation")
-        self.lines: list[str] = []
 
     def generate(self) -> str:
         self._validate_general()
@@ -107,7 +108,7 @@ class TomlToMdConverter:
         self._append_work_algorithm_section()
         self._append_installation_section()
 
-        return "\n".join(self.lines).rstrip() + "\n"
+        return self.render()
 
     def _validate_general(self) -> None:
         # String length limits
@@ -230,8 +231,7 @@ class TomlToMdConverter:
         if isinstance(raw_name, str):
             name = raw_name.strip()
             if name:
-                self.lines.append(f"# {name}")
-                self.lines.append("")
+                self.append_heading(name, level=1)
 
         table_rows: list[tuple[str, str]] = []
         for key, value in self.general.items():
@@ -241,12 +241,7 @@ class TomlToMdConverter:
             label = self._label_for_general_key(key)
             table_rows.append((label, formatted_value))
 
-        if table_rows:
-            self.lines.append("Parameter | Implementation")
-            self.lines.append("-- | --")
-            for label, val in table_rows:
-                self.lines.append(f"{label} | {val}")
-            self.lines.append("")
+        self.append_table(("Parameter", "Implementation"), table_rows)
 
     def _append_video_section(self) -> None:
         video = self.video.get("video")
@@ -269,28 +264,13 @@ class TomlToMdConverter:
         self.lines.append("")
 
     def _append_images_section(self) -> None:
-        if not self.images:
-            return
-
         for title, urls in self.images.items():
             heading = (str(title) or "").strip()
             if not heading:
                 continue
             if not heading.startswith("#"):
                 heading = "## " + heading.capitalize()
-            self.lines.append(heading)
-            self.lines.append("")
-
-            if isinstance(urls, list):
-                self.lines.extend(
-                    f'<div align="center"><img align="center" src="{url}"></div>'
-                    for url in urls
-                )
-            else:
-                self.lines.append(
-                    f'<div align="center"><img align="center" src="{urls}"></div>'
-                )
-            self.lines.append("")
+            self.append_images(heading, urls)
 
     def _append_models_section(self) -> None:
         models = self.models.get("models")
@@ -308,16 +288,9 @@ class TomlToMdConverter:
                 continue
             rows.append((version, description, f"[link]({link})"))
 
-        if not rows:
-            return
-
-        self.lines.append("## Models")
-        self.lines.append("")
-        self.lines.append("Version | Description | Link")
-        self.lines.append("-- | -- | --")
-        for version, description, link_md in rows:
-            self.lines.append(f"{version} | {description} | {link_md}")
-        self.lines.append("")
+        self.append_table(
+            ("Version", "Description", "Link"), rows, title="Models"
+        )
 
     def _append_files_section(self) -> None:
         if not self.files:
@@ -333,74 +306,44 @@ class TomlToMdConverter:
                 name_str = url_str
             items.append((name_str, url_str))
 
-        if items:
-            self.lines.append("## Files")
-            self.lines.append("")
-            for i, (name_str, url_str) in enumerate(items, start=1):
-                self.lines.append(f"{i}. [{name_str}]({url_str})")
-            self.lines.append("")
+        self.append_links("Files", items)
 
     def _append_physical_io_section(self) -> None:
-        if not self.physical_io:
-            return
-
-        self.lines.append("## Physical IO")
-        self.lines.append("")
-        self.lines.append("Key | Description")
-        self.lines.append("-- | --")
-        for key, desc in self.physical_io.items():
-            self.lines.append(f"`{key}` | {desc}")
-        self.lines.append("")
+        rows = [
+            (f"`{key}`", str(desc)) for key, desc in self.physical_io.items()
+        ]
+        self.append_table(("Key", "Description"), rows, title="Physical IO")
 
     def _append_env_description_section(self) -> None:
-        if not self.env_description:
-            return
-
-        self.lines.append("## Env variable assignment")
-        self.lines.append("")
-        self.lines.append("Variable | Description")
-        self.lines.append("-- | --")
-        for key, desc in self.env_description.items():
-            self.lines.append(f"`{key}` | {desc}")
-        self.lines.append("")
+        rows = [
+            (f"`{key}`", str(desc))
+            for key, desc in self.env_description.items()
+        ]
+        self.append_table(
+            ("Variable", "Description"), rows, title="Env variable assignment"
+        )
 
     def _append_topic_assignment_section(self) -> None:
-        if not self.topic_assignment:
-            return
-
-        self.lines.append("## Assignment of Device Topics")
-        self.lines.append("")
-        self.lines.append("Topic | Description")
-        self.lines.append("-- | --")
-        for topic, desc in self.topic_assignment.items():
-            self.lines.append(f"`{topic}` | {desc}")
-        self.lines.append("")
+        rows = [
+            (f"`{topic}`", str(desc))
+            for topic, desc in self.topic_assignment.items()
+        ]
+        self.append_table(
+            ("Topic", "Description"), rows, title="Assignment of Device Topics"
+        )
 
     def _append_work_algorithm_section(self) -> None:
-        steps = self.work_algorithm.get("steps") or []
-        if not steps:
-            return
-
-        self.lines.append("## Work algorithm")
-        self.lines.append("")
-        for i, step in enumerate(steps, start=1):
-            self.lines.append(f"{i}. {step}")
-        self.lines.append("")
+        self.append_steps(
+            "Work algorithm", self.work_algorithm.get("steps") or []
+        )
 
     def _append_installation_section(self) -> None:
-        install_steps = (
+        steps = (
             self.installation.get("steps") or []
             if isinstance(self.installation, dict)
             else []
         )
-        if not install_steps:
-            return
-
-        self.lines.append("## Installation")
-        self.lines.append("")
-        for i, step in enumerate(install_steps, start=1):
-            self.lines.append(f"{i}. {step}")
-        self.lines.append("")
+        self.append_steps("Installation", steps)
 
 
 def toml_to_md(data: dict) -> str:

@@ -12,6 +12,7 @@ from app.routers.v1.repo_router import (
 )
 from app.routers.v1.unit_group_router import router as unit_group_router
 from app.routers.v1.unit_io_router import router as unit_io_router
+from app.routers.v1.unit_manifest_router import router as unit_manifest_router
 from app.routers.v1.unit_router import router as unit_router
 from app.routers.v1.user_router import router as user_router
 
@@ -21,6 +22,7 @@ include_api = api_router.include_router
 
 routers = (
     (error_code_router, "error_codes", "error_codes"),
+    (unit_manifest_router, "unit_manifests", "unit_manifests"),
     (user_router, "users", "users"),
     (icon_router, "icons", "icons"),
     (repo_router, "repo", "repo"),

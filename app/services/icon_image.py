@@ -8,6 +8,7 @@ from PIL import Image, ImageChops, ImageDraw, UnidentifiedImageError
 
 from app.configs.error_codes import ErrorCode
 from app.configs.errors import ValidationError
+from app.validators.content_size import is_valid_content_size
 
 Rgb = tuple[int, int, int]
 _SIDE = 192
@@ -82,9 +83,12 @@ class IconImage:
 
     @classmethod
     def validate(cls, data: bytes) -> None:
-        if len(data) > cls.MAX_BYTES:
-            msg = "Image is larger than 128KB"
-            raise ValidationError(msg, code=ErrorCode.ICON_TOO_LARGE)
+        is_valid_content_size(
+            data,
+            cls.MAX_BYTES,
+            code=ErrorCode.ICON_TOO_LARGE,
+            message="Image is larger than 128KB",
+        )
         cls._require_header(data)
         cls._require_decoded(data)
 

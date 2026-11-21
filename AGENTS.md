@@ -29,6 +29,17 @@
   literals once in enums or typed schema declarations and reuse those types.
   Keep contract defaults in the selected versioned dictionary, not in code.
   Review size is not an exception to this rule.
+- REST route declarations are an exception: write paths in route decorators
+  and prefixes and tags in `app/routers/v1/endpoints.py`, following existing
+  routers. Do not introduce route enums.
+- Fixed technical limits are named `UPPER_SNAKE_CASE` constants on the class
+  that owns the operation, as in `IconImage.MAX_BYTES`. They are not enums.
+  Use `settings` or `runtime.get()` for limits intended to change at runtime.
+- FastAPI wiring follows the existing module-level pattern: `router =
+  APIRouter()`, decorated endpoint functions, and `get_*_service` dependencies
+  in `app/configs/rest.py` are exceptions to the class-only function and
+  module-state rules. Keep business logic in services and assemble their
+  dependencies in `ServiceFactory`.
 - Annotate parameters and return values. Use `list[T]`, `dict[K, V]`, and
   `T | None`. Type entity UUIDs as `uuid_pkg.UUID` with `import uuid as uuid_pkg`.
   Use `datetime.now(UTC)` for the current time.
@@ -52,6 +63,23 @@
 - Before adding a method, search for an existing implementation. Read its
   definition and its callers. Check the arguments, return type, and which
   layer calls it. Reuse a matching method directly.
+- Before introducing a mechanism, trace the closest existing use case from
+  its router through dependencies, service, validators, and repository.
+  Matching a name or one method is not enough. Identify what can be reused
+  before editing. If a rule repeats, extend one shared implementation and
+  switch its consumers in the same review; do not add a local variant or
+  merely hide the duplicate in a new method.
+- For byte-limited uploads, follow `icon_router.upload_icon`: the HTTP
+  boundary reads at most the byte limit plus one; the service validates size
+  before parsing or storing. This is the HTTP transport exception to the
+  rule that file access belongs in repositories. Reading must not reject
+  content or assemble validation errors.
+  Use `is_valid_content_size` in `app/validators/content_size.py` for the
+  shared check. Pass bytes for byte limits and text for character limits.
+- Stateless shared validation functions in `app/validators/` and
+  `app/services/validators.py` follow the existing module-level pattern and
+  are an exception to the class-only function rule. Do not introduce utility
+  classes solely to group these checks.
 - For file formats, put shared decoding, structural validation, and format
   errors in a base repository under `app/repositories/`. A concrete repository
   selects the model and reads the resources specific to that document.

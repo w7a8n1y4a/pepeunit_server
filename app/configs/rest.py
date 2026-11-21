@@ -92,6 +92,7 @@ class ServiceFactory:
             db
         )
         self.unit_io_repository = UnitIORepository(db)
+        self.unit_manifest_repository = UnitManifestRepository()
         self.link_repository = LinkRepository(db)
         self.unit_log_repository = (
             UnitLogRepository(client) if client else None
@@ -184,7 +185,9 @@ class ServiceFactory:
         )
 
     def get_unit_manifest_service(self) -> UnitManifestService:
-        return UnitManifestService(UnitManifestRepository())
+        return UnitManifestService(
+            unit_manifest_repository=self.unit_manifest_repository,
+        )
 
     def get_unit_service(self) -> UnitService:
         return UnitService(
@@ -308,6 +311,15 @@ def get_repo_service(
     jwt_token: str | None = Depends(token_depends),
 ) -> RepoService:
     return create_service_factory(db, None, jwt_token).get_repo_service()
+
+
+def get_unit_manifest_service(
+    db: Session = Depends(get_session),
+    jwt_token: str | None = Depends(token_depends),
+) -> UnitManifestService:
+    return create_service_factory(
+        db, None, jwt_token
+    ).get_unit_manifest_service()
 
 
 def get_unit_group_service(

@@ -13,6 +13,7 @@ from app import settings
 from app.configs.error_codes import ErrorCode
 from app.configs.errors import ReadmeGenerationError
 from app.dto.enum import GlobalPrefixTopic, VisibilityLevel
+from app.validators.content_size import is_valid_content_size
 
 
 def token_depends(
@@ -78,6 +79,8 @@ def dict_to_yml_file(yml_dict: dict) -> str:
 
 
 class TomlToMdConverter:
+    MAX_SOURCE_CHARACTERS = 10000
+
     def __init__(self, data: dict) -> None:
         self.general = data.get("general") or {}
         self.video = data.get("video") or {}
@@ -413,9 +416,13 @@ async def toml_file_to_md(toml_file) -> str:
     if isinstance(content, bytes):
         content = content.decode("utf-8")
 
-    if len(content) > 10000:
-        msg = f"toml is too large ({len(content)}) limit 10000 characters"
-        raise ReadmeGenerationError(msg, code=ErrorCode.README_TOML_TOO_LARGE)
+    is_valid_content_size(
+        content,
+        TomlToMdConverter.MAX_SOURCE_CHARACTERS,
+        code=ErrorCode.README_TOML_TOO_LARGE,
+        message=f"toml is too large ({len(content)}) limit {TomlToMdConverter.MAX_SOURCE_CHARACTERS} characters",
+        error_type=ReadmeGenerationError,
+    )
 
     try:
         data = toml.loads(content)

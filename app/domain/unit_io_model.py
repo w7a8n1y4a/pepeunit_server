@@ -1,7 +1,7 @@
 import uuid as uuid_pkg
 from datetime import datetime
 
-from sqlalchemy import Column, ForeignKey
+from sqlalchemy import Column, ForeignKey, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlmodel import Field, SQLModel
 
@@ -14,6 +14,11 @@ class UnitIO(SQLModel, table=True):
     """
 
     __tablename__ = "units_io"
+    __table_args__ = (
+        UniqueConstraint(
+            "unit_uuid", "topic_name", name="units_io_unit_topic_key"
+        ),
+    )
 
     uuid: uuid_pkg.UUID = Field(
         primary_key=True,

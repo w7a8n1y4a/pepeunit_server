@@ -201,6 +201,7 @@ class ServiceFactory:
             permission_service=self.permission_service,
             operation_task_service=self.get_operation_task_service(),
             unit_io_service=self.get_unit_io_service(),
+            unit_manifest_service=self.get_unit_manifest_service(),
         )
 
     def get_unit_io_service(self) -> UnitIOService:

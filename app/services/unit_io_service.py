@@ -22,7 +22,6 @@ from app.domain.permission_model import PermissionBaseType
 from app.domain.repo_model import Repo
 from app.domain.unit_io_model import UnitIO
 from app.domain.unit_model import Unit
-from app.domain.user_model import User
 from app.dto.clickhouse.aggregation import Aggregation
 from app.dto.clickhouse.last_value import LastValue
 from app.dto.clickhouse.n_records import NRecords
@@ -40,6 +39,7 @@ from app.dto.enum import (
     ProcessingPolicyType,
     ReservedEnvVariableName,
     ReservedInputBaseTopic,
+    UnitExecutionType,
     UnitFirmwareUpdateStatus,
     UnitIOTypeEnum,
     UuidEntity,
@@ -62,6 +62,7 @@ from app.schemas.pydantic.unit_io import (
     UnitIOSetState,
     UnitIOUpdate,
 )
+from app.schemas.pydantic.unit_manifest import UnitDefinition
 from app.services.access_service import AccessService
 from app.services.permission_service import PermissionService
 from app.services.utils import (
@@ -144,16 +145,12 @@ class UnitIOService:
                 ]:
                     continue
 
-                unit_io = UnitIO(
-                    type=(
-                        UnitIOTypeEnum.INPUT
-                        if assignment == DestinationTopicType.INPUT_TOPIC
-                        else UnitIOTypeEnum.OUTPUT
-                    ),
-                    visibility_level=unit.visibility_level,
-                    topic_name=topic,
-                    creator_uuid=unit.creator_uuid,
-                    unit_uuid=unit.uuid,
+                unit_io = self.new_unit_io(
+                    unit,
+                    UnitIOTypeEnum.INPUT
+                    if assignment == DestinationTopicType.INPUT_TOPIC
+                    else UnitIOTypeEnum.OUTPUT,
+                    topic,
                 )
 
                 if (
@@ -191,28 +188,71 @@ class UnitIOService:
                         }
                     )
 
-                unit_io.create_datetime = datetime.datetime.now(datetime.UTC)
-                unit_io.last_update_datetime = unit_io.create_datetime
                 unit_ios_list.append(unit_io)
 
                 agents_default_permission_list.extend(
-                    [
-                        PermissionBaseType(
-                            agent_uuid=agent.uuid,
-                            agent_type=agent.__class__.__name__,
-                            resource_uuid=unit_io.uuid,
-                            resource_type=unit_io.__class__.__name__,
-                        )
-                        for agent in [
-                            unit,
-                            User(uuid=self.access_service.current_agent.uuid),
-                        ]
-                    ]
+                    self.default_permissions(unit, unit_io)
                 )
 
         self.unit_io_repository.bulk_save(unit_ios_list)
         self.access_service.permission_repository.bulk_save(
             agents_default_permission_list
+        )
+
+    @staticmethod
+    def new_unit_io(
+        unit: Unit, direction: UnitIOTypeEnum, name: str
+    ) -> UnitIO:
+        now = datetime.datetime.now(datetime.UTC)
+        return UnitIO(
+            type=direction,
+            visibility_level=unit.visibility_level,
+            topic_name=name,
+            creator_uuid=unit.creator_uuid,
+            unit_uuid=unit.uuid,
+            create_datetime=now,
+            last_update_datetime=now,
+        )
+
+    @staticmethod
+    def default_permissions(
+        unit: Unit, unit_io: UnitIO
+    ) -> list[PermissionBaseType]:
+        return [
+            PermissionBaseType(
+                agent_uuid=agent_uuid,
+                agent_type=agent_type,
+                resource_uuid=unit_io.uuid,
+                resource_type=PermissionEntities.UNIT_IO,
+            )
+            for agent_type, agent_uuid in (
+                (PermissionEntities.UNIT, unit.uuid),
+                (PermissionEntities.USER, unit.creator_uuid),
+            )
+        ]
+
+    def synchronize(
+        self, unit: Unit, target_commit: str, manifest: UnitDefinition
+    ) -> Unit:
+        unit_ios = [
+            self.new_unit_io(unit, direction, name)
+            for direction, declarations in (
+                (UnitIOTypeEnum.INPUT, manifest.input),
+                (UnitIOTypeEnum.OUTPUT, manifest.output),
+            )
+            for name in declarations
+        ]
+        permissions = [
+            permission
+            for unit_io in unit_ios
+            for permission in self.default_permissions(unit, unit_io)
+        ]
+        return self.unit_io_repository.synchronize(
+            unit.uuid,
+            target_commit,
+            manifest.search.execution_type == UnitExecutionType.COMPILED,
+            unit_ios,
+            permissions,
         )
 
     def bulk_update(
@@ -222,8 +262,6 @@ class UnitIOService:
         input_node: dict,
         output_node: dict,
     ) -> None:
-        self.bulk_create(schema_dict, unit, True, input_node, output_node)
-
         unit_io_uuid_delete = []
         for assignment, topic_list in schema_dict.items():
             if assignment == DestinationTopicType.INPUT_TOPIC:
@@ -242,6 +280,7 @@ class UnitIOService:
                 )
 
         self.unit_io_repository.delete(unit_io_uuid_delete)
+        self.bulk_create(schema_dict, unit, True, input_node, output_node)
 
     def bulk_set_visibility_level(self, unit: Unit):
         count, unit_ios = self.unit_io_repository.list(

@@ -12,10 +12,16 @@ import uuid as uuid_pkg
 import zlib
 
 from fastapi import Depends
+from pydantic import ValidationError
 
 from app import runtime, settings
 from app.configs.error_codes import ErrorCode
-from app.configs.errors import MqttError, NoAccessError, UnitError
+from app.configs.errors import (
+    GitRepoError,
+    MqttError,
+    NoAccessError,
+    UnitError,
+)
 from app.domain.operation_task_model import OperationTask
 from app.domain.repo_model import Repo
 from app.domain.unit_io_model import UnitIO
@@ -66,6 +72,7 @@ from app.services.icon_image import IconImage
 from app.services.operation_task_service import OperationTaskService
 from app.services.permission_service import PermissionService
 from app.services.unit_io_service import UnitIOService
+from app.services.unit_manifest_service import UnitManifestService
 from app.services.utils import (
     get_topic_name,
     merge_two_dict_first_priority,
@@ -91,6 +98,7 @@ class UnitService:
         permission_service: PermissionService = Depends(),
         operation_task_service: OperationTaskService = Depends(),
         unit_io_service: UnitIOService = Depends(),
+        unit_manifest_service: UnitManifestService = Depends(),
     ) -> None:
         self.unit_repository = unit_repository
         self.icon_repository = icon_repository
@@ -102,6 +110,7 @@ class UnitService:
         self.permission_service = permission_service
         self.operation_task_service = operation_task_service
         self.unit_io_service = unit_io_service
+        self.unit_manifest_service = unit_manifest_service
 
     def create(self, data: UnitCreate) -> Unit:
         self.access_service.authorization.check_access([AgentType.USER])
@@ -202,6 +211,41 @@ class UnitService:
             )
 
         return result_unit
+
+    def sync_manifest_for_version(
+        self, uuid: uuid_pkg.UUID, target_commit: str
+    ) -> Unit:
+        self.access_service.authorization.check_access(
+            [AgentType.USER, AgentType.BACKEND]
+        )
+        try:
+            unit = self.unit_repository.get(Unit(uuid=uuid))
+            is_valid_object(unit, NotFoundEntity.UNIT)
+            self.access_service.authorization.check_ownership(
+                unit, [OwnershipType.CREATOR]
+            )
+            repo = self.repo_repository.get(Repo(uuid=unit.repo_uuid))
+            is_valid_object(repo, NotFoundEntity.REPO)
+            self.git_repo_repository.is_valid_commit(
+                repo, unit.target_branch, target_commit
+            )
+            content = self.git_repo_repository.get_file_bytes(
+                repo, target_commit, StaticRepoFileName.UNIT_MANIFEST.value
+            )
+            manifest = self.unit_manifest_service.parse(content)
+            result = self.unit_io_service.synchronize(
+                unit, target_commit, manifest
+            )
+            self.unit_repository.db.commit()
+        except ValidationError as error:
+            self.unit_repository.db.rollback()
+            raise GitRepoError(
+                str(error), code=ErrorCode.GIT_REPO_UNIT_MANIFEST_INVALID
+            ) from error
+        except Exception:
+            self.unit_repository.db.rollback()
+            raise
+        return result
 
     def sync_state_unit_ios_for_version(
         self,

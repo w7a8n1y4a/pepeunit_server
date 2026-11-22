@@ -1,4 +1,5 @@
 import uuid as uuid_pkg
+from datetime import UTC, datetime
 
 from fastapi import Depends
 from fastapi.params import Query
@@ -8,9 +9,12 @@ from sqlmodel import Session, select
 
 from app.configs.db import get_session
 from app.domain.link_model import Link
+from app.domain.permission_model import PermissionBaseType
 from app.domain.unit_io_model import UnitIO
-from app.dto.enum import UuidEntity, VisibilityLevel
+from app.domain.unit_model import Unit
+from app.dto.enum import NotFoundEntity, UuidEntity, VisibilityLevel
 from app.repositories.base_repository import BaseRepository
+from app.repositories.permission_repository import PermissionRepository
 from app.repositories.utils import (
     apply_enums,
     apply_ilike_search_string,
@@ -19,7 +23,7 @@ from app.repositories.utils import (
     apply_restriction,
 )
 from app.schemas.pydantic.unit_io import UnitIOFilter
-from app.services.validators import is_valid_uuid
+from app.services.validators import is_valid_object, is_valid_uuid
 
 
 class UnitIORepository(BaseRepository):
@@ -29,6 +33,50 @@ class UnitIORepository(BaseRepository):
     def bulk_save(self, unit_ios: list[UnitIO]) -> None:
         self.db.bulk_save_objects(unit_ios)
         self.db.commit()
+
+    def synchronize(
+        self,
+        unit_uuid: uuid_pkg.UUID,
+        target_commit: str,
+        is_compilable_unit: bool,
+        unit_ios: list[UnitIO],
+        permissions: list[PermissionBaseType],
+    ) -> Unit:
+        unit = self.db.get(
+            Unit, unit_uuid, populate_existing=True, with_for_update=True
+        )
+        is_valid_object(unit, NotFoundEntity.UNIT)
+        existing = (
+            self.db.query(UnitIO).filter(UnitIO.unit_uuid == unit_uuid).all()
+        )
+        desired = {(item.type, item.topic_name) for item in unit_ios}
+        retained = set()
+        for item in existing:
+            key = (item.type, item.topic_name)
+            if key in desired:
+                retained.add(key)
+            else:
+                self.db.delete(item)
+        self.db.flush()
+        added = [
+            item
+            for item in unit_ios
+            if (item.type, item.topic_name) not in retained
+        ]
+        for item in added:
+            item.visibility_level = unit.visibility_level
+        self.db.add_all(added)
+        self.db.flush()
+        added_uuids = {item.uuid for item in added}
+        self.db.add_all(
+            PermissionRepository.base_type_to_domain(permission)
+            for permission in permissions
+            if permission.resource_uuid in added_uuids
+        )
+        unit.target_commit = target_commit
+        unit.is_compilable_unit = is_compilable_unit
+        unit.last_update_datetime = datetime.now(UTC)
+        return unit
 
     def get_by_topic(
         self, unit_uuid: uuid_pkg.UUID, unit_io: UnitIO

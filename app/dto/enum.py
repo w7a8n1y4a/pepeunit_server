@@ -168,6 +168,11 @@ class ManifestContractVersion(str, enum.Enum):
     V1 = "v1"
 
 
+class UnitExecutionType(str, enum.Enum):
+    INTERPRETED = "interpreted"
+    COMPILED = "compiled"
+
+
 class FieldKey(str, enum.Enum):
     SEARCH = "search"
     TYPE = "type"

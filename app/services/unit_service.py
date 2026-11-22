@@ -77,7 +77,6 @@ from app.services.unit_manifest_service import UnitManifestService
 from app.services.utils import (
     get_topic_name,
     merge_two_dict_first_priority,
-    remove_none_value_dict,
 )
 from app.services.validators import (
     is_valid_json,
@@ -125,23 +124,7 @@ class UnitService:
             creator_uuid=self.access_service.current_agent.uuid,
             **data.model_dump(exclude={"is_compilable_unit"}),
         )
-        self.is_valid_update_rule(unit)
-        target_commit, target_tag = (
-            self.git_repo_repository.get_target_unit_version(repo, unit)
-        )
-        manifest = self.read_target_manifest(repo, target_commit)
-        unit.target_commit = target_commit
-        unit.is_compilable_unit = manifest.is_compilable
-        self.is_valid_update_rule(unit)
-        self.git_repo_repository.require_compiled_tag(
-            unit, target_commit, target_tag
-        )
-        self.git_repo_repository.is_valid_firmware_platform(
-            repo,
-            unit,
-            unit.target_firmware_platform,
-            (target_commit, target_tag),
-        )
+        target_commit, _, manifest = self.select_target_manifest(repo, unit)
         if not unit.is_auto_update_unit:
             self.git_repo_repository.get_env_dict(repo, target_commit)
 
@@ -165,6 +148,29 @@ class UnitService:
             raise
         return snapshot
 
+    def select_target_manifest(
+        self, repo: Repo, unit: Unit
+    ) -> tuple[str, str | None, UnitDefinition]:
+        unit.is_compilable_unit = False
+        self.is_valid_update_rule(unit)
+        target_commit, target_tag = (
+            self.git_repo_repository.get_target_unit_version(repo, unit)
+        )
+        manifest = self.read_target_manifest(repo, target_commit)
+        unit.target_commit = target_commit
+        unit.is_compilable_unit = manifest.is_compilable
+        self.is_valid_update_rule(unit)
+        self.git_repo_repository.require_compiled_tag(
+            unit, target_commit, target_tag
+        )
+        self.git_repo_repository.is_valid_firmware_platform(
+            repo,
+            unit,
+            unit.target_firmware_platform,
+            (target_commit, target_tag),
+        )
+        return target_commit, target_tag, manifest
+
     def read_target_manifest(self, repo: Repo, commit: str) -> UnitDefinition:
         content = self.git_repo_repository.get_file_bytes(
             repo, commit, StaticRepoFileName.UNIT_MANIFEST.value
@@ -187,74 +193,45 @@ class UnitService:
 
     def update(self, uuid: uuid_pkg.UUID, data: UnitUpdate) -> Unit:
         self.access_service.authorization.check_access([AgentType.USER])
-
-        unit = self.unit_repository.get(Unit(uuid=uuid))
-        is_valid_object(unit, NotFoundEntity.UNIT)
-        self.access_service.authorization.check_ownership(
-            unit, [OwnershipType.CREATOR]
-        )
-
-        unit_update = Unit(
-            **merge_two_dict_first_priority(
-                remove_none_value_dict(data.dict()), unit.dict()
-            )
-        )
-        self.unit_repository.is_valid_name(unit_update.name)
-
-        repo = self.repo_repository.get(Repo(uuid=unit.repo_uuid))
-        is_valid_object(repo, NotFoundEntity.REPO)
-        self.is_valid_update_rule(unit_update)
-        target_commit, target_tag = (
-            self.git_repo_repository.get_target_unit_version(repo, unit_update)
-        )
-        self.git_repo_repository.is_valid_firmware_platform(
-            repo,
-            unit_update,
-            unit_update.target_firmware_platform,
-            (target_commit, target_tag),
-        )
-
-        unit_update.last_update_datetime = datetime.datetime.now(datetime.UTC)
-        result_unit = self.unit_repository.update(uuid, unit_update)
-        self.unit_io_service.bulk_set_visibility_level(result_unit)
-
-        result_unit = self.sync_state_unit_ios_for_version(
-            result_unit, repo, (target_commit, target_tag)
-        )
-        with contextlib.suppress(MqttError):
-            self.unit_io_service.command_to_input_base_topic(
-                uuid=result_unit.uuid,
-                command=BackendTopicCommand.UPDATE,
-                is_auto_update=True,
-            )
-
-        return result_unit
-
-    def sync_manifest_for_version(
-        self, uuid: uuid_pkg.UUID, target_commit: str
-    ) -> Unit:
-        self.access_service.authorization.check_access(
-            [AgentType.USER, AgentType.BACKEND]
-        )
         try:
-            unit = self.unit_repository.get(Unit(uuid=uuid))
+            unit = self.unit_repository.get(Unit(uuid=uuid), for_update=True)
             is_valid_object(unit, NotFoundEntity.UNIT)
             self.access_service.authorization.check_ownership(
                 unit, [OwnershipType.CREATOR]
             )
             repo = self.repo_repository.get(Repo(uuid=unit.repo_uuid))
             is_valid_object(repo, NotFoundEntity.REPO)
-            self.git_repo_repository.is_valid_commit(
-                repo, unit.target_branch, target_commit
+
+            unit.sqlmodel_update(
+                data.model_dump(
+                    exclude_none=True, exclude={"is_compilable_unit"}
+                )
             )
-            manifest = self.read_target_manifest(repo, target_commit)
+            self.unit_repository.is_valid_name(unit.name)
+            target_commit, target_tag, manifest = self.select_target_manifest(
+                repo, unit
+            )
+            if unit.cipher_env_dict:
+                self.refresh_target_env(unit, repo, target_commit)
+
             result = self.unit_io_service.synchronize(
                 unit, target_commit, manifest
             )
             self.unit_repository.db.commit()
-        except Exception:
+        except Exception as error:
             self.unit_repository.db.rollback()
+            if isinstance(error, IntegrityError):
+                self.unit_repository.raise_name_conflict(error)
             raise
+
+        with contextlib.suppress(MqttError):
+            self.unit_io_service.command_to_input_base_topic(
+                uuid=uuid,
+                command=BackendTopicCommand.UPDATE,
+                is_auto_update=True,
+                target_version_with_tag=(target_commit, target_tag),
+                manifest=manifest,
+            )
         return result
 
     def sync_state_unit_ios_for_version(
@@ -280,21 +257,7 @@ class UnitService:
         self.git_repo_repository.is_valid_schema_file(repo, target_version)
 
         if unit.cipher_env_dict:
-            new_env_dict = self.generate_unified_env(
-                unit=unit,
-                repo=repo,
-                target_version=target_version,
-                user_env_dict=None,
-                include_commit_version=True,
-                filter_by_allowed_keys=True,
-            )
-
-            self.git_repo_repository.is_valid_env_file(
-                repo, target_version, new_env_dict
-            )
-
-            unit.cipher_env_dict = aes_gcm_encode(json.dumps(new_env_dict))
-
+            self.refresh_target_env(unit, repo, target_version)
             unit = self.unit_repository.update(unit.uuid, unit)
 
         count, all_exist_unit_ios = self.unit_io_repository.list(
@@ -323,6 +286,11 @@ class UnitService:
 
         unit.last_update_datetime = datetime.datetime.now(datetime.UTC)
         return self.unit_repository.update(unit.uuid, unit)
+
+    def refresh_target_env(self, unit: Unit, repo: Repo, commit: str) -> None:
+        env = self.generate_unified_env(unit, repo, commit)
+        self.git_repo_repository.is_valid_env_file(repo, commit, env)
+        unit.cipher_env_dict = aes_gcm_encode(json.dumps(env))
 
     def get_env(self, uuid: uuid_pkg.UUID) -> dict:
         self.access_service.authorization.check_access(

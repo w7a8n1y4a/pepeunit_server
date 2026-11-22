@@ -12,7 +12,7 @@ from app.domain.link_model import Link
 from app.domain.permission_model import PermissionBaseType
 from app.domain.unit_io_model import UnitIO
 from app.domain.unit_model import Unit
-from app.dto.enum import NotFoundEntity, UuidEntity, VisibilityLevel
+from app.dto.enum import UuidEntity, VisibilityLevel
 from app.repositories.base_repository import BaseRepository
 from app.repositories.permission_repository import PermissionRepository
 from app.repositories.utils import (
@@ -23,7 +23,8 @@ from app.repositories.utils import (
     apply_restriction,
 )
 from app.schemas.pydantic.unit_io import UnitIOFilter
-from app.services.validators import is_valid_object, is_valid_uuid
+from app.services.utils import get_visibility_level_priority
+from app.services.validators import is_valid_uuid
 
 
 class UnitIORepository(BaseRepository):
@@ -36,25 +37,28 @@ class UnitIORepository(BaseRepository):
 
     def synchronize(
         self,
-        unit_uuid: uuid_pkg.UUID,
+        unit: Unit,
         target_commit: str,
         is_compilable_unit: bool,
         unit_ios: list[UnitIO],
         permissions: list[PermissionBaseType],
     ) -> Unit:
-        unit = self.db.get(
-            Unit, unit_uuid, populate_existing=True, with_for_update=True
-        )
-        is_valid_object(unit, NotFoundEntity.UNIT)
         existing = (
-            self.db.query(UnitIO).filter(UnitIO.unit_uuid == unit_uuid).all()
+            self.db.query(UnitIO).filter(UnitIO.unit_uuid == unit.uuid).all()
         )
+        visibility = get_visibility_level_priority(unit.visibility_level)
+        now = datetime.now(UTC)
         desired = {(item.type, item.topic_name) for item in unit_ios}
         retained = set()
         for item in existing:
             key = (item.type, item.topic_name)
             if key in desired:
                 retained.add(key)
+                if visibility > get_visibility_level_priority(
+                    item.visibility_level
+                ):
+                    item.visibility_level = unit.visibility_level
+                    item.last_update_datetime = now
             else:
                 self.db.delete(item)
         self.db.flush()
@@ -63,8 +67,6 @@ class UnitIORepository(BaseRepository):
             for item in unit_ios
             if (item.type, item.topic_name) not in retained
         ]
-        for item in added:
-            item.visibility_level = unit.visibility_level
         self.db.add_all(added)
         self.db.flush()
         added_uuids = {item.uuid for item in added}
@@ -75,7 +77,7 @@ class UnitIORepository(BaseRepository):
         )
         unit.target_commit = target_commit
         unit.is_compilable_unit = is_compilable_unit
-        unit.last_update_datetime = datetime.now(UTC)
+        unit.last_update_datetime = now
         return unit
 
     def get_by_topic(

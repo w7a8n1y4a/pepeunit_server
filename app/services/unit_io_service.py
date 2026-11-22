@@ -66,7 +66,6 @@ from app.services.permission_service import PermissionService
 from app.services.utils import (
     dict_to_yml_file,
     get_topic_name,
-    get_visibility_level_priority,
     merge_two_dict_first_priority,
     remove_none_value_dict,
     yml_file_to_dict,
@@ -233,7 +232,7 @@ class UnitIOService:
             )
         ]
         return self.unit_io_repository.synchronize(
-            unit.uuid,
+            unit,
             target_commit,
             manifest.is_compilable,
             unit_ios,
@@ -266,24 +265,6 @@ class UnitIOService:
 
         self.unit_io_repository.delete(unit_io_uuid_delete)
         self.bulk_create(schema_dict, unit, True, input_node, output_node)
-
-    def bulk_set_visibility_level(self, unit: Unit):
-        count, unit_ios = self.unit_io_repository.list(
-            filters=UnitIOFilter.unlimited(unit_uuid=unit.uuid)
-        )
-
-        update_list = []
-        for unit_io in unit_ios:
-            if get_visibility_level_priority(
-                unit.visibility_level
-            ) > get_visibility_level_priority(unit_io.visibility_level):
-                unit_io.visibility_level = unit.visibility_level
-                unit_io.last_update_datetime = datetime.datetime.now(
-                    datetime.UTC
-                )
-                update_list.append(unit_io)
-
-        self.unit_io_repository.bulk_save(update_list)
 
     async def update(self, uuid: uuid_pkg.UUID, data: UnitIOUpdate) -> UnitIO:
         self.access_service.authorization.check_access([AgentType.USER])
@@ -373,6 +354,9 @@ class UnitIOService:
         uuid: uuid_pkg.UUID,
         command: BackendTopicCommand,
         is_auto_update: bool = False,
+        *,
+        target_version_with_tag: tuple[str, str | None] | None = None,
+        manifest: UnitDefinition | None = None,
     ) -> None:
         if not is_auto_update:
             self.access_service.authorization.check_access(
@@ -390,14 +374,19 @@ class UnitIOService:
         repo = self.repo_repository.get(Repo(uuid=unit.repo_uuid))
         is_valid_object(repo, NotFoundEntity.REPO)
 
+        if target_version_with_tag is not None:
+            if unit.target_commit != target_version_with_tag[0]:
+                return
+            target_version, target_tag = target_version_with_tag
+        else:
+            target_version, target_tag = (
+                self.git_repo_repository.get_target_unit_version(repo, unit)
+            )
         self.git_repo_repository.is_valid_firmware_platform(
-            repo, unit, unit.target_firmware_platform
-        )
-        target_version, target_tag = (
-            self.git_repo_repository.get_target_unit_version(repo, unit)
-        )
-        schema_dict = self.git_repo_repository.get_schema_dict(
-            repo, target_version
+            repo,
+            unit,
+            unit.target_firmware_platform,
+            (target_version, target_tag),
         )
 
         command_to_topic_dict = {
@@ -408,11 +397,19 @@ class UnitIOService:
             BackendTopicCommand.RESET: ReservedInputBaseTopic.RESET.value,
         }
 
-        target_topic = (
-            command_to_topic_dict[command]
-            + GlobalPrefixTopic.BACKEND_SUB_PREFIX.value
-        )
-        if target_topic in schema_dict["input_base_topic"]:
+        input_name = command_to_topic_dict[command]
+        target_topic = input_name + GlobalPrefixTopic.BACKEND_SUB_PREFIX.value
+        if manifest is None:
+            schema_dict = self.git_repo_repository.get_schema_dict(
+                repo, target_version
+            )
+            declared = (
+                target_topic
+                in schema_dict[DestinationTopicType.INPUT_BASE_TOPIC]
+            )
+        else:
+            declared = input_name in manifest.input
+        if declared:
             update_message_dict = self._build_message_dict(
                 command,
                 repo,

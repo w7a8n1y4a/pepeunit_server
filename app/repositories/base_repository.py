@@ -30,8 +30,13 @@ class BaseRepository[T: SQLModel]:
         self.db.refresh(obj)
         return obj
 
-    def get(self, obj: T) -> T | None:
-        return self.db.get(self.model, obj.uuid)
+    def get(self, obj: T, *, for_update: bool = False) -> T | None:
+        return self.db.get(
+            self.model,
+            obj.uuid,
+            with_for_update=for_update,
+            populate_existing=for_update,
+        )
 
     def get_all_count(self) -> int:
         return self.db.query(self.model).count()

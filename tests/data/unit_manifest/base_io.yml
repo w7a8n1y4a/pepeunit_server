@@ -11,11 +11,11 @@ docs: {}
 env: {}
 
 input:
-  update: {base: update}
-  env_update: {base: env_update}
-  schema_update: {base: schema_update}
-  log_sync: {base: log_sync}
-  reset: {base: reset}
+  update: {}
+  env_update: {}
+  schema_update: {}
+  log_sync: {}
+  reset: {}
 output:
-  state: {base: state}
-  log: {base: log}
+  state: {}
+  log: {}

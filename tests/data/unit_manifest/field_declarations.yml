@@ -14,7 +14,7 @@ env:
   TOKEN: {type: string, max_bytes: 128, secret: true}
 
 input:
-  reset: {base: reset}
+  reset: {}
   target:
     type: string
     format: uuid

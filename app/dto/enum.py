@@ -177,7 +177,6 @@ class FieldKey(str, enum.Enum):
     ENV = "env"
     INPUT = "input"
     OUTPUT = "output"
-    BASE = "base"
     OPTIONAL = "optional"
     NULLABLE = "nullable"
     EXTRA = "extra"

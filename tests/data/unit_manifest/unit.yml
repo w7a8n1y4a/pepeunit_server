@@ -16,7 +16,7 @@ env:
   PROBE_PIN: {type: int, min: 0, example: 4}
 
 input:
-  reset: {base: reset}
+  reset: {}
 
 output:
   temperature: {type: float, unit: Cel}

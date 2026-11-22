@@ -5,7 +5,7 @@ search:
   execution_type: interpreted
   name: resolved-controller
   platforms: [linux]
-  description: Demonstrates named base IO and defaults across nested schemas.
+  description: Demonstrates reserved IO and defaults across nested schemas.
 
 env:
   ENABLED: {type: bool, default: false}
@@ -23,8 +23,8 @@ env:
     default: {name: room, labels: []}
 
 input:
-  restart: {base: reset}
-  update_settings: {base: env_update}
+  reset: {}
+  env_update: {}
   relay:
     type: object
     qos: 1
@@ -36,8 +36,8 @@ input:
     example: {action: pulse, duration: 500}
 
 output:
-  status: {base: state}
-  journal: {base: log}
+  state: {}
+  log: {}
   button: {type: string, codec: utf8, qos: 0}
   packet: {type: bytes, max_bytes: 220}
   samples:

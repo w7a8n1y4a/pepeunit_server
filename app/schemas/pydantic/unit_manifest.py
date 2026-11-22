@@ -20,7 +20,6 @@ from app.dto.enum import (
 
 class FieldDeclaration(TypedDict, total=False):
     type: str
-    base: str
     min: int | float
     max: int | float
     max_bytes: int
@@ -102,26 +101,31 @@ class UnitDefinition(ManifestContractHeader):
             )
 
     def resolve_fields(self, dictionary: ManifestDictionary) -> None:
+        for name in self.output:
+            self.require_field(
+                name not in self.input,
+                (FieldKey.OUTPUT, name),
+                "IO names must be unique across Input and Output",
+            )
+        reserved_names = dictionary.input.keys() | dictionary.output.keys()
         for section in (FieldKey.ENV, FieldKey.INPUT, FieldKey.OUTPUT):
             declarations = getattr(self, section)
             for name in declarations:
                 field = declarations[name]
-                if FieldKey.BASE in field:
-                    path = (section, name, FieldKey.BASE)
-                    self.require_field(
-                        section != FieldKey.ENV
-                        and len(field) == 1
-                        and bool(field[FieldKey.BASE]),
-                        path,
-                        "A base declaration must contain only a non-empty base in Input or Output",
-                    )
+                if section != FieldKey.ENV and name in reserved_names:
                     definitions = getattr(dictionary, section)
-                    self.require_choice(
-                        field[FieldKey.BASE], definitions, path
+                    path = (section, name)
+                    self.require_field(
+                        name in definitions,
+                        path,
+                        "Reserved IO name is not allowed in this direction",
                     )
-                    base = field[FieldKey.BASE]
-                    field = deepcopy(definitions[base])
-                    field[FieldKey.BASE] = base
+                    self.require_field(
+                        not field,
+                        path,
+                        "Reserved IO declarations must be empty",
+                    )
+                    field = deepcopy(definitions[name])
                     declarations[name] = field
                 self.apply_field_defaults(field, dictionary, section)
 
@@ -168,14 +172,6 @@ class UnitDefinition(ManifestContractHeader):
         dictionary: ManifestDictionary,
         path: tuple[str | int, ...],
     ) -> None:
-        if FieldKey.BASE in field:
-            self.require_field(
-                len(path) == 2
-                and path[0] != FieldKey.ENV
-                and bool(field[FieldKey.BASE]),
-                path,
-                "A base identifier is only allowed on top-level Input or Output",
-            )
         self.require_field(
             FieldKey.TYPE in field, (*path, FieldKey.TYPE), "Type is required"
         )

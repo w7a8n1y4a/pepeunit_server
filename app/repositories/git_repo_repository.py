@@ -385,39 +385,54 @@ class GitRepoRepository:
             else None
         )
 
-    def get_target_unit_version(
+    def get_selected_commit_and_tag(
         self, repo: Repo, unit: Unit
     ) -> tuple[str, str | None]:
         branch = unit.target_branch
         self.is_valid_branch(repo, branch)
 
         if unit.is_auto_update_unit:
-            if unit.is_compilable_unit or unit.is_only_tag_update:
-                page = self.get_branch_tagged_commits_page(repo, branch, 0, 1)
-                target = page[0] if page else None
-            else:
-                sha = self.get_repo(repo).git.rev_parse(self._origin(branch))
-                target = self._commit(repo, sha)
+            resolved_commit_and_tag = self.resolve_auto_commit_and_tag(
+                repo, unit
+            )
+            if resolved_commit_and_tag is not None:
+                return resolved_commit_and_tag
         else:
-            self.is_valid_commit(repo, branch, unit.target_commit)
-            target = self.get_commit_with_tag(repo, branch, unit.target_commit)
-            if target:
-                self.require_compiled_tag(
-                    unit, target["commit"], target["tag"]
-                )
+            target_commit = unit.target_commit or ""
+            self.is_valid_commit(repo, branch, target_commit)
+            commit_info = self.get_commit_with_tag(repo, branch, target_commit)
+            if commit_info:
+                commit, tag = commit_info["commit"], commit_info["tag"]
+                self.require_compiled_tag(unit, commit, tag)
+                return commit, tag
 
-        if not target:
-            msg = "Version is missing: The tags are not in the repository"
-            raise GitRepoError(msg, code=ErrorCode.GIT_REPO_VERSION_MISSING)
+        msg = "Version is missing: The tags are not in the repository"
+        raise GitRepoError(msg, code=ErrorCode.GIT_REPO_VERSION_MISSING)
 
-        return target["commit"], target["tag"]
+    def resolve_auto_commit_and_tag(
+        self, repo: Repo, unit: Unit
+    ) -> tuple[str, str | None] | None:
+        branch = unit.target_branch
+        if unit.is_compilable_unit or unit.is_only_tag_update:
+            page = self.get_branch_tagged_commits_page(repo, branch, 0, 1)
+            commit_info = page[0] if page else None
+        else:
+            branch_head = self.get_repo(repo).git.rev_parse(
+                self._origin(branch)
+            )
+            commit_info = self._commit(repo, branch_head)
+        if not commit_info:
+            return None
+        resolved_commit, resolved_tag = (
+            commit_info["commit"],
+            commit_info["tag"],
+        )
+        return resolved_commit, resolved_tag
 
     @staticmethod
-    def require_compiled_tag(
-        unit: Unit, target_commit: str, target_tag: str | None
-    ) -> None:
-        if unit.is_compilable_unit and target_tag is None:
-            msg = f"Commit {target_commit} without Tag"
+    def require_compiled_tag(unit: Unit, commit: str, tag: str | None) -> None:
+        if unit.is_compilable_unit and tag is None:
+            msg = f"Commit {commit} without Tag"
             raise GitRepoError(msg, code=ErrorCode.GIT_REPO_COMMIT_WITHOUT_TAG)
 
     def get_file_bytes(self, repo: Repo, commit: str, path: str) -> bytes:
@@ -526,7 +541,7 @@ class GitRepoRepository:
         repo: Repo,
         unit: Unit,
         firmware_platform: str,
-        target_version_with_tag: tuple[str, str | None] | None = None,
+        selected_commit_and_tag: tuple[str, str | None] | None = None,
     ):
         if not unit.is_compilable_unit:
             return
@@ -536,15 +551,16 @@ class GitRepoRepository:
             repo.releases_data,
             JsonPayload.RELEASES_FOR_COMPILE_REPO_TITLE,
         )
-        _, target_tag = (
-            target_version_with_tag or self.get_target_unit_version(repo, unit)
+        _, selected_tag = (
+            selected_commit_and_tag
+            or self.get_selected_commit_and_tag(repo, unit)
         )
-        target_platforms = releases.get(target_tag)
+        release_platforms = releases.get(selected_tag)
 
-        if not target_platforms:
-            msg = "Target Tag has no platforms"
+        if not release_platforms:
+            msg = "Release tag has no platforms"
             raise GitRepoError(msg, code=ErrorCode.GIT_REPO_TAG_NO_PLATFORMS)
 
-        if self.find_by_platform(target_platforms, firmware_platform) is None:
-            msg = f"Not find platform {firmware_platform}, available: {[item[0] for item in target_platforms]}"
+        if self.find_by_platform(release_platforms, firmware_platform) is None:
+            msg = f"Not find platform {firmware_platform}, available: {[item[0] for item in release_platforms]}"
             raise GitRepoError(msg, code=ErrorCode.GIT_REPO_PLATFORM_NOT_FOUND)

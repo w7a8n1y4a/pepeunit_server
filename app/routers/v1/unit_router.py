@@ -13,8 +13,8 @@ from app.dto.enum import BackendTopicCommand
 from app.schemas.pydantic.shared import MqttRead
 from app.schemas.pydantic.unit import (
     EnvJsonString,
+    SelectedVersionRead,
     StateStorage,
-    TargetVersionRead,
     UnitCreate,
     UnitFilter,
     UnitLogFilter,
@@ -55,11 +55,16 @@ def get_env(
     return unit_service.get_env(uuid)
 
 
-@router.get("/get_target_version/{uuid}", response_model=TargetVersionRead)
-def get_target_version(
+@router.get(
+    "/get_target_version/{uuid}",
+    response_model=SelectedVersionRead,
+    include_in_schema=False,
+)
+@router.get("/get_selected_version/{uuid}", response_model=SelectedVersionRead)
+def get_selected_version(
     uuid: uuid_pkg.UUID, unit_service: UnitService = Depends(get_unit_service)
 ):
-    return unit_service.get_target_version(uuid)
+    return unit_service.get_selected_version(uuid)
 
 
 @router.get("/get_current_schema/{uuid}", response_model=dict)

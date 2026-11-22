@@ -96,7 +96,7 @@ class UnitLogsResult(BaseModel):
     unit_logs: list[UnitLogRead]
 
 
-class TargetVersionRead(BaseModel):
+class SelectedVersionRead(BaseModel):
     commit: str
     tag: str | None = None
 

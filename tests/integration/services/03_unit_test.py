@@ -240,8 +240,8 @@ def test_get_firmware(unpacked_firmwares, compile_unit, regular_user_token, data
     with pytest.raises(UnitError):
         service.get_unit_firmware_tgz(compile_unit.uuid, 9, 13)
 
-    target_version = service.get_target_version(compile_unit.uuid)
-    assert target_version.commit != ""
+    selected_version = service.get_selected_version(compile_unit.uuid)
+    assert selected_version.commit != ""
 
 
 def test_state_storage(universal_auto_unit, regular_user_token, database, cc) -> None:
@@ -268,7 +268,7 @@ def test_hand_update_firmware_unit(
     service = unit_service(database, cc, token)
     target_units = running_units.firmware_manual()
 
-    target_versions = []
+    manual_commits = []
     for unit in target_units:
         logging.info(unit.uuid)
         _read, commits = branch_commits(
@@ -278,14 +278,14 @@ def test_hand_update_firmware_unit(
             only_tag=unit.is_only_tag_update,
             count=2,
         )
-        target_version = commits[1].commit
-        target_versions.append(target_version)
-        logging.info(f"{unit.name}, {unit.uuid},{target_version}")
-        assert patch_unit_commit(token, unit, target_version) < 400
+        manual_commit = commits[1].commit
+        manual_commits.append(manual_commit)
+        logging.info(f"{unit.name}, {unit.uuid},{manual_commit}")
+        assert patch_unit_commit(token, unit, manual_commit) < 400
 
     expected = {
         unit.uuid: version
-        for unit, version in zip(target_units, target_versions, strict=True)
+        for unit, version in zip(target_units, manual_commits, strict=True)
     }
 
     def all_updated() -> bool:
@@ -343,11 +343,13 @@ def test_auto_update_firmware_unit(
     service = unit_service(database, cc, token)
     source, middle, sink = running_units.chain()
     _, commits = branch_commits(database, token, source.repo_uuid)
-    target_version = commits[0].commit
-    assert patch_unit_commit(token, source, target_version) < 400
+    branch_head_commit = commits[0].commit
+    assert patch_unit_commit(token, source, branch_head_commit) < 400
 
     wait_until(
-        lambda: service.get(source.uuid).current_commit_version == target_version,
+        lambda: (
+            service.get(source.uuid).current_commit_version == branch_head_commit
+        ),
         timeout=runtime.get().pu_instance_unit_state_send_interval * 2 + 10,
         message="hand unit update did not reach unit commit",
         session=database,
@@ -374,8 +376,10 @@ def test_auto_update_firmware_unit(
     def bulk_reached() -> bool:
         middle_commit = service.get(middle.uuid).current_commit_version
         sink_commit = service.get(sink.uuid).current_commit_version
-        logging.info((middle_commit, sink_commit, target_version, tag_commit))
-        return middle_commit == target_version and sink_commit == tag_commit
+        logging.info(
+            (middle_commit, sink_commit, branch_head_commit, tag_commit)
+        )
+        return middle_commit == branch_head_commit and sink_commit == tag_commit
 
     wait_until(
         bulk_reached,

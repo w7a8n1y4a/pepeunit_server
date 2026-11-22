@@ -68,7 +68,7 @@ class Unit(SQLModel, table=True):
 
     target_branch: str = Field(nullable=False)
     # Pin used when is_auto_update_unit is false.
-    target_commit: str = Field(nullable=True)
+    target_commit: str | None = Field(default=None, nullable=True)
 
     last_update_datetime: datetime = Field(nullable=False)
 
@@ -114,6 +114,8 @@ class Unit(SQLModel, table=True):
 
     def to_dict(self, include_unit_state: bool = True) -> dict:
         base_dict = self.dict()
+        if self.is_auto_update_unit:
+            base_dict["target_commit"] = None
         if include_unit_state:
             base_dict["unit_state"] = self.unit_state
         return base_dict

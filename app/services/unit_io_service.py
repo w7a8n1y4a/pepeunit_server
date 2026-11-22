@@ -163,9 +163,7 @@ class UnitIOService:
 
         return unit_io
 
-    def synchronize(
-        self, unit: Unit, target_commit: str, manifest: UnitDefinition
-    ) -> Unit:
+    def synchronize(self, unit: Unit, manifest: UnitDefinition) -> Unit:
         unit_ios = [
             self.new_unit_io(unit, direction, name)
             for direction, declarations in (
@@ -183,7 +181,6 @@ class UnitIOService:
         ]
         return self.unit_io_repository.synchronize(
             unit,
-            target_commit,
             manifest.is_compilable,
             unit_ios,
             permissions,
@@ -278,7 +275,7 @@ class UnitIOService:
         command: BackendTopicCommand,
         is_auto_update: bool = False,
         *,
-        target_version_with_tag: tuple[str, str | None] | None = None,
+        selected_commit_and_tag: tuple[str, str | None] | None = None,
         manifest: UnitDefinition | None = None,
     ) -> None:
         if not is_auto_update:
@@ -297,19 +294,22 @@ class UnitIOService:
         repo = self.repo_repository.get(Repo(uuid=unit.repo_uuid))
         is_valid_object(repo, NotFoundEntity.REPO)
 
-        if target_version_with_tag is not None:
-            if unit.target_commit != target_version_with_tag[0]:
-                return
-            target_version, target_tag = target_version_with_tag
-        else:
-            target_version, target_tag = (
-                self.git_repo_repository.get_target_unit_version(repo, unit)
-            )
+        rechecked_commit_and_tag = (
+            self.git_repo_repository.get_selected_commit_and_tag(repo, unit)
+        )
+        if (
+            selected_commit_and_tag is not None
+            and selected_commit_and_tag[0] != rechecked_commit_and_tag[0]
+        ):
+            return
+        selected_commit, selected_tag = (
+            selected_commit_and_tag or rechecked_commit_and_tag
+        )
         self.git_repo_repository.is_valid_firmware_platform(
             repo,
             unit,
             unit.target_firmware_platform,
-            (target_version, target_tag),
+            (selected_commit, selected_tag),
         )
 
         command_to_topic_dict = {
@@ -324,7 +324,7 @@ class UnitIOService:
         target_topic = input_name + GlobalPrefixTopic.BACKEND_SUB_PREFIX.value
         if manifest is None:
             schema_dict = self.git_repo_repository.get_schema_dict(
-                repo, target_version
+                repo, selected_commit
             )
             declared = (
                 target_topic
@@ -337,8 +337,8 @@ class UnitIOService:
                 command,
                 repo,
                 unit,
-                target_version,
-                target_tag,
+                selected_commit,
+                selected_tag,
             )
 
             try:
@@ -374,20 +374,20 @@ class UnitIOService:
         command: BackendTopicCommand,
         repo: Repo,
         unit: Unit,
-        target_version: str,
-        target_tag: str,
+        selected_commit: str,
+        selected_tag: str,
     ) -> dict:
         message_dict = {"COMMAND": command}
 
         if command == BackendTopicCommand.UPDATE:
             message_dict[ReservedEnvVariableName.PU_COMMIT_VERSION.value] = (
-                target_version
+                selected_commit
             )
             if unit.is_compilable_unit:
                 links = is_valid_json(
                     repo.releases_data,
                     JsonPayload.RELEASES_FOR_COMPILE_REPO_TITLE,
-                )[target_tag]
+                )[selected_tag]
                 _, link = self.git_repo_repository.find_by_platform(
                     links, unit.target_firmware_platform
                 )

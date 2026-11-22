@@ -81,12 +81,12 @@ class MqttMessageHandler:
             unit = unit_repository.get(Unit(uuid=unit_uuid))
             is_valid_object(unit, NotFoundEntity.UNIT)
 
-            new_commit = self._get_commit_version(unit_state_dict)
+            device_commit = self._get_commit_version(unit_state_dict)
             waiting_firmware = (
                 unit.firmware_update_status
                 == UnitFirmwareUpdateStatus.REQUEST_SENT
             )
-            same_commit = new_commit == unit.current_commit_version
+            same_commit = device_commit == unit.current_commit_version
             interval = self._state_send_interval(unit)
             too_frequent = self._is_state_rate_limited(topic, interval)
 
@@ -96,7 +96,7 @@ class MqttMessageHandler:
 
             self.last_state_times[topic] = time.time()
             unit.unit_state_dict = json.dumps(unit_state_dict)
-            unit.current_commit_version = new_commit
+            unit.current_commit_version = device_commit
             unit.last_update_datetime = datetime.datetime.now(datetime.UTC)
 
             self._sync_firmware_update_status(db, unit, interval)
@@ -201,7 +201,7 @@ class MqttMessageHandler:
             return
 
         repo = RepoRepository(db).get(Repo(uuid=unit.repo_uuid))
-        target_commit, _ = GitRepoRepository().get_target_unit_version(
+        selected_commit, _ = GitRepoRepository().get_selected_commit_and_tag(
             repo, unit
         )
 
@@ -210,7 +210,7 @@ class MqttMessageHandler:
             - ensure_timezone_aware(unit.last_firmware_update_datetime)
         ).total_seconds()
 
-        if target_commit == unit.current_commit_version:
+        if selected_commit == unit.current_commit_version:
             unit.firmware_update_error = None
             unit.last_firmware_update_datetime = None
             unit.firmware_update_status = UnitFirmwareUpdateStatus.SUCCESS

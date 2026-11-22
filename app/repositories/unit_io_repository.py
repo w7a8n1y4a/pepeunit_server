@@ -34,7 +34,6 @@ class UnitIORepository(BaseRepository):
     def synchronize(
         self,
         unit: Unit,
-        target_commit: str,
         is_compilable_unit: bool,
         unit_ios: list[UnitIO],
         permissions: list[PermissionBaseType],
@@ -71,7 +70,6 @@ class UnitIORepository(BaseRepository):
             for permission in permissions
             if permission.resource_uuid in added_uuids
         )
-        unit.target_commit = target_commit
         unit.is_compilable_unit = is_compilable_unit
         unit.last_update_datetime = now
         return unit

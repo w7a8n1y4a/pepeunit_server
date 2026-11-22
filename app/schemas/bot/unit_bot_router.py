@@ -178,18 +178,18 @@ class UnitBotRouter(BaseBotRouter):
         self, callback: types.CallbackQuery, state: FSMContext
     ) -> None:
         filters = await self._get_filters(state, callback)
-        unit, target_version, current_schema, is_creator = self._get_unit_data(
-            callback
+        unit, selected_version, current_schema, is_creator = (
+            self._get_unit_data(callback)
         )
 
-        text = self._build_unit_info_text(unit, target_version)
+        text = self._build_unit_info_text(unit, selected_version)
         if unit.unit_state:
             text += self._build_unit_state_text(unit)
 
         text += "```"
 
         keyboard = self._build_keyboard(
-            unit, is_creator, current_schema, target_version, filters
+            unit, is_creator, current_schema, selected_version, filters
         )
 
         await callback.answer(parse_mode="Markdown")
@@ -230,9 +230,9 @@ class UnitBotRouter(BaseBotRouter):
             )
 
             try:
-                target_version = unit_service.get_target_version(unit_uuid)
+                selected_version = unit_service.get_selected_version(unit_uuid)
             except Exception:
-                target_version = None
+                selected_version = None
 
             try:
                 current_schema = unit_service.get_current_schema(unit_uuid)
@@ -244,9 +244,9 @@ class UnitBotRouter(BaseBotRouter):
                 == unit.creator_uuid
             )
 
-        return unit, target_version, current_schema, is_creator
+        return unit, selected_version, current_schema, is_creator
 
-    def _build_unit_info_text(self, unit, target_version):
+    def _build_unit_info_text(self, unit, selected_version):
         text = f"*Unit* - `{self.header_name_limit(unit.name)}` - *{unit.visibility_level}*\n```text\n"
 
         table = [
@@ -289,41 +289,41 @@ class UnitBotRouter(BaseBotRouter):
             + "\n"
         )
 
-        if target_version:
-            text += self._build_version_info(unit, target_version)
+        if selected_version:
+            text += self._build_version_info(unit, selected_version)
 
         return text
 
-    def _build_version_info(self, unit, target_version):
-        current_version = (
+    def _build_version_info(self, unit, selected_version):
+        device_commit_short = (
             self.git_hash_limit(unit.current_commit_version)
             if unit.current_commit_version
             else None
         )
-        target_version = (
-            self.git_hash_limit(target_version.commit)
-            if target_version.commit
+        selected_commit_short = (
+            self.git_hash_limit(selected_version.commit)
+            if selected_version.commit
             else None
         )
 
         if (
             not unit.firmware_update_status
-            and current_version == target_version
+            and device_commit_short == selected_commit_short
         ):
             status = UnitFirmwareUpdateStatus.SUCCESS
         elif (
             not unit.firmware_update_status
-            and current_version != target_version
+            and device_commit_short != selected_commit_short
         ):
             status = "Need"
-        elif not target_version and not current_version:
+        elif not selected_commit_short and not device_commit_short:
             status = "No Data"
         else:
             status = unit.firmware_update_status
 
         table = [
-            ["Current Version", current_version],
-            ["Target Version", target_version],
+            ["Current Version", device_commit_short],
+            ["Selected Version", selected_commit_short],
             ["Update status", status],
         ]
 
@@ -393,7 +393,7 @@ class UnitBotRouter(BaseBotRouter):
         return "\n" + make_monospace_table_with_title(table, "Unit State")
 
     def _build_keyboard(
-        self, unit, is_creator, current_schema, target_version, filters
+        self, unit, is_creator, current_schema, selected_version, filters
     ):
         keyboard = []
 
@@ -427,7 +427,7 @@ class UnitBotRouter(BaseBotRouter):
                     ]
                 )
 
-            if target_version:
+            if selected_version:
                 commands = [
                     DecreesNames.TGZ.value,
                     DecreesNames.TAR.value,

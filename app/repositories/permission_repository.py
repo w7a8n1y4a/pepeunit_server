@@ -110,6 +110,9 @@ class PermissionRepository(BaseRepository):
         self.db.refresh(permission)
         return self.domain_to_base_type(permission)
 
+    def stage(self, permissions: list[PermissionBaseType]) -> None:
+        self.db.add_all(self.base_type_to_domain(item) for item in permissions)
+
     def bulk_save(self, base_permissions: list[PermissionBaseType]) -> None:
         self.db.bulk_save_objects(
             [

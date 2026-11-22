@@ -31,6 +31,10 @@ class UnitRepository(UniqueNameMixin, BaseRepository):
     def __init__(self, db: Session = Depends(get_session)) -> None:
         super().__init__(Unit, db)
 
+    def stage(self, unit: Unit) -> None:
+        self.db.add(unit)
+        self.db.flush()
+
     def list(
         self,
         filters: UnitFilter,

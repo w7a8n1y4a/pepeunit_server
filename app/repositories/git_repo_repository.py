@@ -403,7 +403,10 @@ class GitRepoRepository:
         else:
             self.is_valid_commit(repo, branch, unit.target_commit)
             target = self.get_commit_with_tag(repo, branch, unit.target_commit)
-            self._raise_if_compilable_untagged(unit, target)
+            if target:
+                self.require_compiled_tag(
+                    unit, target["commit"], target["tag"]
+                )
 
         if not target:
             msg = "Version is missing: The tags are not in the repository"
@@ -412,9 +415,11 @@ class GitRepoRepository:
         return target["commit"], target["tag"]
 
     @staticmethod
-    def _raise_if_compilable_untagged(unit: Unit, target: dict | None) -> None:
-        if target and unit.is_compilable_unit and target["tag"] is None:
-            msg = "Commit {} without Tag".format(target["commit"])
+    def require_compiled_tag(
+        unit: Unit, target_commit: str, target_tag: str | None
+    ) -> None:
+        if unit.is_compilable_unit and target_tag is None:
+            msg = f"Commit {target_commit} without Tag"
             raise GitRepoError(msg, code=ErrorCode.GIT_REPO_COMMIT_WITHOUT_TAG)
 
     def get_file_bytes(self, repo: Repo, commit: str, path: str) -> bytes:

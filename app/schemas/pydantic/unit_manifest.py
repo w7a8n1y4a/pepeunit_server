@@ -15,6 +15,7 @@ from app.dto.enum import (
     MqttQos,
     OutputRouting,
     PayloadCodec,
+    UnitExecutionType,
 )
 
 
@@ -81,6 +82,10 @@ class UnitDefinition(ManifestContractHeader):
     env: FieldDeclarations = Field(default_factory=dict)
     input: FieldDeclarations = Field(default_factory=dict)
     output: FieldDeclarations = Field(default_factory=dict)
+
+    @property
+    def is_compilable(self) -> bool:
+        return self.search.execution_type == UnitExecutionType.COMPILED
 
     def validate_search(self, dictionary: ManifestDictionary) -> None:
         self.require_choice(

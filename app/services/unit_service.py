@@ -13,6 +13,7 @@ import zlib
 
 from fastapi import Depends
 from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
 
 from app import runtime, settings
 from app.configs.error_codes import ErrorCode
@@ -26,7 +27,6 @@ from app.domain.operation_task_model import OperationTask
 from app.domain.repo_model import Repo
 from app.domain.unit_io_model import UnitIO
 from app.domain.unit_model import Unit
-from app.domain.user_model import User
 from app.dto.agent.abc import AgentBackend, AgentUnit
 from app.dto.clickhouse.log import UnitLog
 from app.dto.enum import (
@@ -66,6 +66,7 @@ from app.schemas.pydantic.unit import (
     UnitUpdate,
 )
 from app.schemas.pydantic.unit_io import UnitIOFilter
+from app.schemas.pydantic.unit_manifest import UnitDefinition
 from app.services.access_service import AccessService
 from app.services.background import BackgroundService
 from app.services.icon_image import IconImage
@@ -121,11 +122,19 @@ class UnitService:
         self.access_service.authorization.check_repo_access(repo)
 
         unit = Unit(
-            creator_uuid=self.access_service.current_agent.uuid, **data.dict()
+            creator_uuid=self.access_service.current_agent.uuid,
+            **data.model_dump(exclude={"is_compilable_unit"}),
         )
         self.is_valid_update_rule(unit)
         target_commit, target_tag = (
             self.git_repo_repository.get_target_unit_version(repo, unit)
+        )
+        manifest = self.read_target_manifest(repo, target_commit)
+        unit.target_commit = target_commit
+        unit.is_compilable_unit = manifest.is_compilable
+        self.is_valid_update_rule(unit)
+        self.git_repo_repository.require_compiled_tag(
+            unit, target_commit, target_tag
         )
         self.git_repo_repository.is_valid_firmware_platform(
             repo,
@@ -133,30 +142,39 @@ class UnitService:
             unit.target_firmware_platform,
             (target_commit, target_tag),
         )
-        self.git_repo_repository.is_valid_schema_file(repo, target_commit)
         if not unit.is_auto_update_unit:
             self.git_repo_repository.get_env_dict(repo, target_commit)
 
-        schema_dict = self.git_repo_repository.get_schema_dict(
-            repo, target_commit
+        try:
+            unit.create_datetime = datetime.datetime.now(datetime.UTC)
+            unit.last_update_datetime = unit.create_datetime
+            unit.icon_uuid = self.icon_repository.stage(
+                IconImage.generate(str(unit.uuid))
+            ).uuid
+            self.unit_repository.stage(unit)
+            self.permission_service.stage_new_unit_permissions(unit)
+            result = self.unit_io_service.synchronize(
+                unit, target_commit, manifest
+            )
+            snapshot = copy.deepcopy(result)
+            self.unit_repository.db.commit()
+        except Exception as error:
+            self.unit_repository.db.rollback()
+            if isinstance(error, IntegrityError):
+                self.unit_repository.raise_name_conflict(error)
+            raise
+        return snapshot
+
+    def read_target_manifest(self, repo: Repo, commit: str) -> UnitDefinition:
+        content = self.git_repo_repository.get_file_bytes(
+            repo, commit, StaticRepoFileName.UNIT_MANIFEST.value
         )
-
-        unit.create_datetime = datetime.datetime.now(datetime.UTC)
-        unit.last_update_datetime = unit.create_datetime
-        unit.icon_uuid = self.icon_repository.stage(
-            IconImage.generate(str(unit.uuid))
-        ).uuid
-        unit = self.unit_repository.create(unit)
-        unit_deepcopy = copy.deepcopy(unit)
-
-        self.permission_service.create_by_domains(
-            User(uuid=self.access_service.current_agent.uuid), unit
-        )
-        self.permission_service.create_by_domains(unit, unit)
-
-        self.unit_io_service.bulk_create(schema_dict, unit, False)
-
-        return unit_deepcopy
+        try:
+            return self.unit_manifest_service.parse(content)
+        except ValidationError as error:
+            raise GitRepoError(
+                str(error), code=ErrorCode.GIT_REPO_UNIT_MANIFEST_INVALID
+            ) from error
 
     def get(self, uuid: uuid_pkg.UUID) -> Unit:
         self.access_service.authorization.check_access(
@@ -229,19 +247,11 @@ class UnitService:
             self.git_repo_repository.is_valid_commit(
                 repo, unit.target_branch, target_commit
             )
-            content = self.git_repo_repository.get_file_bytes(
-                repo, target_commit, StaticRepoFileName.UNIT_MANIFEST.value
-            )
-            manifest = self.unit_manifest_service.parse(content)
+            manifest = self.read_target_manifest(repo, target_commit)
             result = self.unit_io_service.synchronize(
                 unit, target_commit, manifest
             )
             self.unit_repository.db.commit()
-        except ValidationError as error:
-            self.unit_repository.db.rollback()
-            raise GitRepoError(
-                str(error), code=ErrorCode.GIT_REPO_UNIT_MANIFEST_INVALID
-            ) from error
         except Exception:
             self.unit_repository.db.rollback()
             raise

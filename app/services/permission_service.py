@@ -8,7 +8,13 @@ from app.domain.permission_model import PermissionBaseType
 from app.domain.unit_io_model import UnitIO
 from app.domain.unit_model import Unit
 from app.domain.user_model import User
-from app.dto.enum import AgentType, NotFoundEntity, OwnershipType, UuidEntity
+from app.dto.enum import (
+    AgentType,
+    NotFoundEntity,
+    OwnershipType,
+    PermissionEntities,
+    UuidEntity,
+)
 from app.repositories.permission_repository import PermissionRepository
 from app.schemas.pydantic.permission import PermissionCreate, PermissionFilter
 from app.services.access_service import AccessService
@@ -71,6 +77,33 @@ class PermissionService:
         )
 
         return self.create(new_permission, is_api=False)
+
+    @staticmethod
+    def default_unit_permissions(
+        unit: Unit, resource: Unit | UnitIO
+    ) -> list[PermissionBaseType]:
+        resource_type = (
+            PermissionEntities.UNIT
+            if isinstance(resource, Unit)
+            else PermissionEntities.UNIT_IO
+        )
+        return [
+            PermissionBaseType(
+                agent_uuid=agent_uuid,
+                agent_type=agent_type,
+                resource_uuid=resource.uuid,
+                resource_type=resource_type,
+            )
+            for agent_type, agent_uuid in (
+                (PermissionEntities.UNIT, unit.uuid),
+                (PermissionEntities.USER, unit.creator_uuid),
+            )
+        ]
+
+    def stage_new_unit_permissions(self, unit: Unit) -> None:
+        self.permission_repository.stage(
+            self.default_unit_permissions(unit, unit)
+        )
 
     def get_resource_agents(
         self, filters: PermissionFilter

@@ -92,31 +92,33 @@ class UniqueNameMixin[T: SQLModel]:
             return method(*args)
         except IntegrityError as err:
             self.db.rollback()
-            constraint_name, field_name = self._creator_name_constraint(
-                self.model
-            )
-            current_name = getattr(
-                getattr(err.orig, "diag", None), "constraint_name", None
-            )
-            if current_name != constraint_name:
-                raise
-            message = f"{field_name.capitalize()} is not unique"
-            model = self.model
-            if model is Unit:
-                raise UnitError(
-                    message, code=ErrorCode.UNIT_NAME_NOT_UNIQUE
-                ) from err
-            if model is UnitGroup:
-                raise UnitGroupError(
-                    message, code=ErrorCode.UNIT_GROUP_NAME_NOT_UNIQUE
-                ) from err
-            if model is Dashboard:
-                raise GrafanaError(
-                    message, code=ErrorCode.GRAFANA_NAME_NOT_UNIQUE
-                ) from err
-            if model is DashboardPanel:
-                raise GrafanaError(
-                    message, code=ErrorCode.GRAFANA_TITLE_NOT_UNIQUE
-                ) from err
-            msg = f"No name error for {model.__name__}"
-            raise RuntimeError(msg) from err
+            self.raise_name_conflict(err)
+            raise
+
+    def raise_name_conflict(self, err: IntegrityError) -> None:
+        constraint_name, field_name = self._creator_name_constraint(self.model)
+        current_name = getattr(
+            getattr(err.orig, "diag", None), "constraint_name", None
+        )
+        if current_name != constraint_name:
+            return
+        message = f"{field_name.capitalize()} is not unique"
+        model = self.model
+        if model is Unit:
+            raise UnitError(
+                message, code=ErrorCode.UNIT_NAME_NOT_UNIQUE
+            ) from err
+        if model is UnitGroup:
+            raise UnitGroupError(
+                message, code=ErrorCode.UNIT_GROUP_NAME_NOT_UNIQUE
+            ) from err
+        if model is Dashboard:
+            raise GrafanaError(
+                message, code=ErrorCode.GRAFANA_NAME_NOT_UNIQUE
+            ) from err
+        if model is DashboardPanel:
+            raise GrafanaError(
+                message, code=ErrorCode.GRAFANA_TITLE_NOT_UNIQUE
+            ) from err
+        msg = f"No name error for {model.__name__}"
+        raise RuntimeError(msg) from err

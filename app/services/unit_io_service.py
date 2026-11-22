@@ -18,7 +18,6 @@ from app.configs.errors import (
 )
 from app.configs.redis import DataPipeConfigAction, send_to_data_pipe_stream
 from app.domain.link_model import Link
-from app.domain.permission_model import PermissionBaseType
 from app.domain.repo_model import Repo
 from app.domain.unit_io_model import UnitIO
 from app.domain.unit_model import Unit
@@ -39,7 +38,6 @@ from app.dto.enum import (
     ProcessingPolicyType,
     ReservedEnvVariableName,
     ReservedInputBaseTopic,
-    UnitExecutionType,
     UnitFirmwareUpdateStatus,
     UnitIOTypeEnum,
     UuidEntity,
@@ -153,45 +151,12 @@ class UnitIOService:
                     topic,
                 )
 
-                if (
-                    runtime.get().pu_datapipe_default_last_value_enable
-                    and topic.endswith(
-                        GlobalPrefixTopic.BACKEND_SUB_PREFIX.value
-                    )
-                ):
-                    unit_io.is_data_pipe_active = True
-                    unit_io.data_pipe_yml = json.dumps(
-                        {
-                            "active_period": {
-                                "type": "Permanent",
-                                "start": None,
-                                "end": None,
-                            },
-                            "filters": {
-                                "type_input_value": "Text",
-                                "type_value_filtering": None,
-                                "filtering_values": None,
-                                "type_value_threshold": None,
-                                "threshold_min": None,
-                                "threshold_max": None,
-                                "max_rate": 5,
-                                "last_unique_check": False,
-                                "max_size": 100,
-                            },
-                            "transformations": None,
-                            "processing_policy": {
-                                "policy_type": "LastValue",
-                                "n_records_count": None,
-                                "time_window_size": None,
-                                "aggregation_functions": None,
-                            },
-                        }
-                    )
-
                 unit_ios_list.append(unit_io)
 
                 agents_default_permission_list.extend(
-                    self.default_permissions(unit, unit_io)
+                    self.permission_service.default_unit_permissions(
+                        unit, unit_io
+                    )
                 )
 
         self.unit_io_repository.bulk_save(unit_ios_list)
@@ -204,7 +169,7 @@ class UnitIOService:
         unit: Unit, direction: UnitIOTypeEnum, name: str
     ) -> UnitIO:
         now = datetime.datetime.now(datetime.UTC)
-        return UnitIO(
+        unit_io = UnitIO(
             type=direction,
             visibility_level=unit.visibility_level,
             topic_name=name,
@@ -214,22 +179,40 @@ class UnitIOService:
             last_update_datetime=now,
         )
 
-    @staticmethod
-    def default_permissions(
-        unit: Unit, unit_io: UnitIO
-    ) -> list[PermissionBaseType]:
-        return [
-            PermissionBaseType(
-                agent_uuid=agent_uuid,
-                agent_type=agent_type,
-                resource_uuid=unit_io.uuid,
-                resource_type=PermissionEntities.UNIT_IO,
+        if (
+            runtime.get().pu_datapipe_default_last_value_enable
+            and name.endswith(GlobalPrefixTopic.BACKEND_SUB_PREFIX.value)
+        ):
+            unit_io.is_data_pipe_active = True
+            unit_io.data_pipe_yml = json.dumps(
+                {
+                    "active_period": {
+                        "type": "Permanent",
+                        "start": None,
+                        "end": None,
+                    },
+                    "filters": {
+                        "type_input_value": "Text",
+                        "type_value_filtering": None,
+                        "filtering_values": None,
+                        "type_value_threshold": None,
+                        "threshold_min": None,
+                        "threshold_max": None,
+                        "max_rate": 5,
+                        "last_unique_check": False,
+                        "max_size": 100,
+                    },
+                    "transformations": None,
+                    "processing_policy": {
+                        "policy_type": "LastValue",
+                        "n_records_count": None,
+                        "time_window_size": None,
+                        "aggregation_functions": None,
+                    },
+                }
             )
-            for agent_type, agent_uuid in (
-                (PermissionEntities.UNIT, unit.uuid),
-                (PermissionEntities.USER, unit.creator_uuid),
-            )
-        ]
+
+        return unit_io
 
     def synchronize(
         self, unit: Unit, target_commit: str, manifest: UnitDefinition
@@ -245,12 +228,14 @@ class UnitIOService:
         permissions = [
             permission
             for unit_io in unit_ios
-            for permission in self.default_permissions(unit, unit_io)
+            for permission in self.permission_service.default_unit_permissions(
+                unit, unit_io
+            )
         ]
         return self.unit_io_repository.synchronize(
             unit.uuid,
             target_commit,
-            manifest.search.execution_type == UnitExecutionType.COMPILED,
+            manifest.is_compilable,
             unit_ios,
             permissions,
         )

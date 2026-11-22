@@ -31,10 +31,6 @@ class UnitIORepository(BaseRepository):
     def __init__(self, db: Session = Depends(get_session)) -> None:
         super().__init__(UnitIO, db)
 
-    def bulk_save(self, unit_ios: list[UnitIO]) -> None:
-        self.db.bulk_save_objects(unit_ios)
-        self.db.commit()
-
     def synchronize(
         self,
         unit: Unit,
@@ -131,10 +127,6 @@ class UnitIORepository(BaseRepository):
             .group_by(UnitIO.uuid, UnitIO.topic_name, UnitIO.type)
             .all()
         )
-
-    def delete(self, del_uuid_list: list[str]) -> None:
-        self.db.query(UnitIO).filter(UnitIO.uuid.in_(del_uuid_list)).delete()
-        self.db.commit()
 
     def list(
         self, filters: UnitIOFilter, restriction: list[str] = None

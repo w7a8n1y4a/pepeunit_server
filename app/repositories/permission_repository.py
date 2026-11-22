@@ -113,15 +113,6 @@ class PermissionRepository(BaseRepository):
     def stage(self, permissions: list[PermissionBaseType]) -> None:
         self.db.add_all(self.base_type_to_domain(item) for item in permissions)
 
-    def bulk_save(self, base_permissions: list[PermissionBaseType]) -> None:
-        self.db.bulk_save_objects(
-            [
-                self.base_type_to_domain(permission)
-                for permission in base_permissions
-            ]
-        )
-        self.db.commit()
-
     @staticmethod
     def get_agent_fld_uuid_by_type(
         fld_type: PermissionEntities,

@@ -113,56 +113,6 @@ class UnitIOService:
         is_valid_object(unit_io, NotFoundEntity.UNIT_IO)
         return unit_io
 
-    def bulk_create(
-        self,
-        schema_dict: dict,
-        unit: Unit,
-        is_update: bool = False,
-        input_node: dict = None,
-        output_node: dict = None,
-    ) -> None:
-        unit_ios_list = []
-        agents_default_permission_list = []
-        for assignment, topic_list in schema_dict.items():
-            for topic in topic_list:
-                if is_update:
-                    if (
-                        assignment == DestinationTopicType.INPUT_TOPIC
-                        and topic not in input_node
-                    ) or (
-                        assignment == DestinationTopicType.OUTPUT_TOPIC
-                        and topic not in output_node
-                    ):
-                        pass
-                    else:
-                        continue
-                elif assignment not in [
-                    DestinationTopicType.INPUT_TOPIC,
-                    DestinationTopicType.OUTPUT_TOPIC,
-                ]:
-                    continue
-
-                unit_io = self.new_unit_io(
-                    unit,
-                    UnitIOTypeEnum.INPUT
-                    if assignment == DestinationTopicType.INPUT_TOPIC
-                    else UnitIOTypeEnum.OUTPUT,
-                    topic,
-                )
-
-                unit_ios_list.append(unit_io)
-
-                agents_default_permission_list.extend(
-                    self.permission_service.default_unit_permissions(
-                        unit, unit_io
-                    )
-                )
-
-        self.unit_io_repository.bulk_save(unit_ios_list)
-        self.access_service.permission_repository.bulk_save(
-            agents_default_permission_list
-        )
-
     @staticmethod
     def new_unit_io(
         unit: Unit, direction: UnitIOTypeEnum, name: str
@@ -238,33 +188,6 @@ class UnitIOService:
             unit_ios,
             permissions,
         )
-
-    def bulk_update(
-        self,
-        schema_dict: dict,
-        unit: Unit,
-        input_node: dict,
-        output_node: dict,
-    ) -> None:
-        unit_io_uuid_delete = []
-        for assignment, topic_list in schema_dict.items():
-            if assignment == DestinationTopicType.INPUT_TOPIC:
-                unit_io_uuid_delete.extend(
-                    [
-                        input_node[topic]
-                        for topic in input_node.keys() - set(topic_list)
-                    ]
-                )
-            elif assignment == DestinationTopicType.OUTPUT_TOPIC:
-                unit_io_uuid_delete.extend(
-                    [
-                        output_node[topic]
-                        for topic in output_node.keys() - set(topic_list)
-                    ]
-                )
-
-        self.unit_io_repository.delete(unit_io_uuid_delete)
-        self.bulk_create(schema_dict, unit, True, input_node, output_node)
 
     async def update(self, uuid: uuid_pkg.UUID, data: UnitIOUpdate) -> UnitIO:
         self.access_service.authorization.check_access([AgentType.USER])

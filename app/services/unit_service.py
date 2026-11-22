@@ -1,6 +1,5 @@
 import base64
 import builtins
-import contextlib
 import copy
 import datetime
 import itertools
@@ -199,32 +198,36 @@ class UnitService:
             self.access_service.authorization.check_ownership(
                 unit, [OwnershipType.CREATOR]
             )
-            repo = self.repo_repository.get(Repo(uuid=unit.repo_uuid))
-            is_valid_object(repo, NotFoundEntity.REPO)
-
             unit.sqlmodel_update(
                 data.model_dump(
                     exclude_none=True, exclude={"is_compilable_unit"}
                 )
             )
             self.unit_repository.is_valid_name(unit.name)
-            target_commit, target_tag, manifest = self.select_target_manifest(
-                repo, unit
-            )
-            if unit.cipher_env_dict:
-                self.refresh_target_env(unit, repo, target_commit)
-
-            result = self.unit_io_service.synchronize(
-                unit, target_commit, manifest
-            )
-            self.unit_repository.db.commit()
+            return self.apply_target_update(unit, suppress_mqtt_error=True)
         except Exception as error:
             self.unit_repository.db.rollback()
             if isinstance(error, IntegrityError):
                 self.unit_repository.raise_name_conflict(error)
             raise
 
-        with contextlib.suppress(MqttError):
+    def apply_target_update(
+        self, unit: Unit, *, suppress_mqtt_error: bool = False
+    ) -> Unit:
+        repo = self.repo_repository.get(Repo(uuid=unit.repo_uuid))
+        is_valid_object(repo, NotFoundEntity.REPO)
+        target_commit, target_tag, manifest = self.select_target_manifest(
+            repo, unit
+        )
+        if unit.cipher_env_dict:
+            self.refresh_target_env(unit, repo, target_commit)
+
+        uuid = unit.uuid
+        result = self.unit_io_service.synchronize(
+            unit, target_commit, manifest
+        )
+        self.unit_repository.db.commit()
+        try:
             self.unit_io_service.command_to_input_base_topic(
                 uuid=uuid,
                 command=BackendTopicCommand.UPDATE,
@@ -232,60 +235,10 @@ class UnitService:
                 target_version_with_tag=(target_commit, target_tag),
                 manifest=manifest,
             )
+        except MqttError:
+            if not suppress_mqtt_error:
+                raise
         return result
-
-    def sync_state_unit_ios_for_version(
-        self,
-        unit: Unit,
-        repo: Repo,
-        target_version_with_tag: tuple[str, str | None] = None,
-    ) -> Unit:
-        target_version, target_tag = (
-            target_version_with_tag
-            or self.git_repo_repository.get_target_unit_version(repo, unit)
-        )
-        self.git_repo_repository.is_valid_firmware_platform(
-            repo,
-            unit,
-            unit.target_firmware_platform,
-            target_version_with_tag=(target_version, target_tag),
-        )
-
-        if target_version == unit.current_commit_version:
-            return self.unit_repository.update(unit.uuid, unit)
-
-        self.git_repo_repository.is_valid_schema_file(repo, target_version)
-
-        if unit.cipher_env_dict:
-            self.refresh_target_env(unit, repo, target_version)
-            unit = self.unit_repository.update(unit.uuid, unit)
-
-        count, all_exist_unit_ios = self.unit_io_repository.list(
-            UnitIOFilter.unlimited(unit_uuid=unit.uuid)
-        )
-
-        input_node_dict = {
-            unit_io.topic_name: unit_io.uuid
-            for unit_io in all_exist_unit_ios
-            if unit_io.type == UnitIOTypeEnum.INPUT
-        }
-
-        output_node_dict = {
-            unit_io.topic_name: unit_io.uuid
-            for unit_io in all_exist_unit_ios
-            if unit_io.type == UnitIOTypeEnum.OUTPUT
-        }
-
-        schema_dict = self.git_repo_repository.get_schema_dict(
-            repo, target_version
-        )
-
-        self.unit_io_service.bulk_update(
-            schema_dict, unit, input_node_dict, output_node_dict
-        )
-
-        unit.last_update_datetime = datetime.datetime.now(datetime.UTC)
-        return self.unit_repository.update(unit.uuid, unit)
 
     def refresh_target_env(self, unit: Unit, repo: Repo, commit: str) -> None:
         env = self.generate_unified_env(unit, repo, commit)
@@ -691,23 +644,24 @@ class UnitService:
         _, units = self.unit_repository.list(
             UnitFilter.unlimited(is_auto_update_unit=True)
         )
-        logging.info(f"{len(units)} units update launched")
+        unit_uuids = [unit.uuid for unit, _ in units]
+        logging.info(f"{len(unit_uuids)} units update launched")
 
         success = 0
         error = 0
-        for unit, _nodes in units:
+        for uuid in unit_uuids:
             try:
-                repo = self.repo_repository.get(Repo(uuid=unit.repo_uuid))
-                is_valid_object(repo, NotFoundEntity.REPO)
-                self.sync_state_unit_ios_for_version(unit, repo)
-                self.unit_io_service.command_to_input_base_topic(
-                    uuid=unit.uuid,
-                    command=BackendTopicCommand.UPDATE,
-                    is_auto_update=True,
+                unit = self.unit_repository.get(
+                    Unit(uuid=uuid), for_update=True
                 )
+                if unit is None or not unit.is_auto_update_unit:
+                    self.unit_repository.db.rollback()
+                    continue
+                self.apply_target_update(unit)
                 success += 1
             except Exception as exc:
-                logging.warning(f"Failed update unit {unit.uuid} {exc}")
+                self.unit_repository.db.rollback()
+                logging.warning(f"Failed update unit {uuid} {exc}")
                 error += 1
 
         return f"Updated {success}, failed {error}"

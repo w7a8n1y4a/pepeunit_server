@@ -155,9 +155,6 @@ class AppSettings(SettingsValidationMixin, BaseModel):
         43200,
         86400,
     ]
-    pu_available_topic_symbols: ClassVar[str] = (
-        string.ascii_letters + string.digits + "/_-"
-    )
     pu_available_name_entity_symbols: ClassVar[str] = (
         string.ascii_letters + string.digits + "_-."
     )

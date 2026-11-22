@@ -2,7 +2,6 @@ import contextlib
 import os
 import shutil
 import uuid as uuid_pkg
-from collections import Counter
 
 from git import Blob
 from git import Repo as GitRepo
@@ -15,7 +14,6 @@ from app.configs.utils import get_directory_size
 from app.domain.repo_model import Repo
 from app.domain.unit_model import Unit
 from app.dto.enum import (
-    DestinationTopicType,
     GitPlatform,
     JsonPayload,
     NotFoundEntity,
@@ -477,46 +475,6 @@ class GitRepoRepository:
             self.get_path_physic_repository(repo),
             ignore_errors=True,
         )
-
-    def is_valid_schema_file(self, repo: Repo, commit: str) -> None:
-        schema_dict = self.get_schema_dict(repo, commit)
-
-        binding_schema_keys = [i.value for i in DestinationTopicType]
-
-        if len(binding_schema_keys) != len(
-            set(schema_dict.keys()) & set(binding_schema_keys)
-        ):
-            msg = "This schema file has unresolved IO and base IO keys"
-            raise GitRepoError(
-                msg, code=ErrorCode.GIT_REPO_SCHEMA_UNRESOLVED_KEYS
-            )
-
-        schema_dict_values_type = [
-            type(value) for value in schema_dict.values()
-        ]
-
-        if Counter(schema_dict_values_type)[list] != len(schema_dict):
-            msg = "This schema file has not available value types, only list is available"
-            raise GitRepoError(msg, code=ErrorCode.GIT_REPO_SCHEMA_VALUE_TYPE)
-
-        all_unique_chars_topic = Counter(
-            "".join([item for value in schema_dict.values() for item in value])
-        ).keys()
-
-        if (
-            set(all_unique_chars_topic)
-            - set(settings.pu_available_topic_symbols)
-        ) != set():
-            msg = f"Topics in the schema use characters that are not allowed, allowed: {settings.pu_available_topic_symbols}"
-            raise GitRepoError(msg, code=ErrorCode.GIT_REPO_TOPIC_CHARS)
-
-        current_len = max(
-            [len(item) for value in schema_dict.values() for item in value]
-        )
-        max_value = 65535 - 100
-        if current_len >= max_value:
-            msg = f"The length {current_len} of the topic title is too long, max: {max_value}"
-            raise GitRepoError(msg, code=ErrorCode.GIT_REPO_TOPIC_TOO_LONG)
 
     def is_valid_env_file(self, repo: Repo, commit: str, env: dict) -> None:
         env_example_dict = self.get_env_dict(repo, commit)

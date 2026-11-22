@@ -97,11 +97,6 @@ class FeatureFlagError(CustomException):
     message_template = "Feature Flag Error: {}"
 
 
-class ReadmeGenerationError(CustomException):
-    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
-    message_template = "Readme Generation Error: {}"
-
-
 class InstanceError(CustomException):
     status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
     message_template = "Instance Validation Error: {}"

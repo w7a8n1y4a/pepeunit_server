@@ -2,9 +2,9 @@ import logging
 import os
 import uuid as uuid_pkg
 
-from fastapi import APIRouter, Depends, File, UploadFile, status
+from fastapi import APIRouter, Depends, status
 from starlette.background import BackgroundTask
-from starlette.responses import FileResponse, PlainTextResponse
+from starlette.responses import FileResponse
 
 from app.configs.clickhouse import get_hand_clickhouse_client
 from app.configs.db import get_hand_session
@@ -230,16 +230,3 @@ def download_unit_logs(
         media_type="text/plain; charset=utf-8",
         background=BackgroundTask(cleanup),
     )
-
-
-@router.post(
-    "/convert_toml_to_md",
-    response_class=PlainTextResponse,
-    status_code=status.HTTP_200_OK,
-)
-async def convert_toml_to_md(
-    file: UploadFile = File(...),
-    unit_service: UnitService = Depends(get_unit_service),
-):
-    md = await unit_service.convert_toml_file_to_md(file)
-    return PlainTextResponse(content=md, media_type="text/markdown")

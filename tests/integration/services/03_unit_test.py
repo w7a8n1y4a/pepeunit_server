@@ -5,10 +5,8 @@ import os
 import re
 import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
-from io import BytesIO
 
 import pytest
-from starlette.datastructures import UploadFile
 
 from app import runtime, settings
 from app.configs.clickhouse import get_clickhouse_client
@@ -18,10 +16,10 @@ from app.configs.errors import (
     GitRepoError,
     MqttError,
     NoAccessError,
-    ReadmeGenerationError,
     RepoError,
     UnitError,
 )
+from app.configs.rest import get_unit_manifest_service
 from app.dto.agent.abc import AgentBackend
 from app.dto.clickhouse.log import UnitLog
 from app.dto.enum import (
@@ -44,7 +42,7 @@ from app.schemas.pydantic.unit import (
     UnitUpdate,
 )
 from app.schemas.pydantic.unit_io import UnitIOFilter
-from app.services.utils import TomlToMdConverter, get_topic_name
+from app.services.utils import get_topic_name
 from app.utils.utils import aes_gcm_encode
 from tests.integration.helpers.http import (
     get_unit_logs_file,
@@ -586,43 +584,40 @@ def test_download_unit_logs(
     assert response.text == content
 
 
-@pytest.mark.asyncio
-async def test_convert_toml_file_to_md(regular_user_token, database, cc) -> None:
-    service = unit_service(database, cc, regular_user_token)
-
-    def upload(content: bytes, name: str) -> UploadFile:
-        return UploadFile(file=BytesIO(content), filename=name)
-
+def test_convert_unit_manifest_to_md(regular_user_token, database) -> None:
+    service = get_unit_manifest_service(database, regular_user_token)
     tests_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    base_toml_dir = os.path.join(tests_dir, "data", "toml")
-
-    toml_path = os.path.join(base_toml_dir, "pepeunit.toml")
-    with open(toml_path, "rb") as handle:
+    manifest_path = os.path.join(tests_dir, "data", "unit_manifest", "unit.yml")
+    with open(manifest_path, "rb") as handle:
         content = handle.read()
-    md = await service.convert_toml_file_to_md(upload(content, "pepeunit.toml"))
-    assert isinstance(md, str)
-    assert md.strip() != ""
-    assert md.lstrip().startswith("# WiFi Temp Sensor ds18b20")
+    md = service.readme(content)
+    assert md.startswith("# room-thermometer\n")
     assert "Parameter | Implementation" in md
-    assert "## Files" in md
+    assert "## Work algorithm" in md
+    assert "## Environment" in md
+    assert "## Input" in md
+    assert "## Output" in md
+    assert '"base": "reset"' in md
+    assert '"COMMAND"' in md
 
-    maximum = TomlToMdConverter.MAX_SOURCE_CHARACTERS
-    with pytest.raises(ReadmeGenerationError) as failure:
-        await service.convert_toml_file_to_md(
-            upload(b" " * (maximum + 1), "pepeunit.toml")
+    maximum = service.MAX_UPLOAD_BYTES
+    with pytest.raises(GitRepoError) as failure:
+        service.readme(b" " * (maximum + 1))
+    assert (
+        failure.value.error_code == ErrorCode.GIT_REPO_UNIT_MANIFEST_TOO_LARGE
+    )
+
+    for bad_content in (
+        b"search: [",
+        content.replace(b"v1", b"v999", 1),
+        content.replace(b"type: sensor", b"type: unknown"),
+    ):
+        with pytest.raises(GitRepoError) as failure:
+            service.readme(bad_content)
+        assert (
+            failure.value.error_code
+            == ErrorCode.GIT_REPO_UNIT_MANIFEST_INVALID
         )
-    assert failure.value.error_code == ErrorCode.README_TOML_TOO_LARGE
-
-    bad_files = [
-        "bad_syntax_pepeunit.toml",
-        "bad_general_items_pepeunit.toml",
-        "bad_general_text_pepeunit.toml",
-    ]
-    for bad_name in bad_files:
-        with open(os.path.join(base_toml_dir, bad_name), "rb") as handle:
-            bad_content = handle.read()
-        with pytest.raises(ReadmeGenerationError):
-            await service.convert_toml_file_to_md(upload(bad_content, bad_name))
 
 
 def test_get_current_schema(

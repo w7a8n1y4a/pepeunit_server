@@ -44,14 +44,5 @@ class ReadmeMarkdown:
         )
         self.lines.append("")
 
-    def append_steps(self, title: str, items: Sequence[object]) -> None:
-        if not items:
-            return
-        self.append_heading(title)
-        self.lines.extend(
-            f"{index}. {item}" for index, item in enumerate(items, start=1)
-        )
-        self.lines.append("")
-
     def render(self) -> str:
         return "\n".join(self.lines).rstrip() + "\n"

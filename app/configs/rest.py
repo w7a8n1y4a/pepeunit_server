@@ -187,6 +187,7 @@ class ServiceFactory:
     def get_unit_manifest_service(self) -> UnitManifestService:
         return UnitManifestService(
             unit_manifest_repository=self.unit_manifest_repository,
+            access_service=self.access_service,
         )
 
     def get_unit_service(self) -> UnitService:

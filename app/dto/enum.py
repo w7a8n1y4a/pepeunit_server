@@ -201,6 +201,17 @@ class FieldKey(str, enum.Enum):
     SECRET = "secret"
 
 
+class ManifestDocKey(str, enum.Enum):
+    VIDEO = "video"
+    PREVIEW = "preview"
+    LINK = "link"
+    SCHEMA = "schema"
+    IMAGES = "images"
+    MODELS = "models"
+    ALGORITHM = "algorithm"
+    INSTALLATION = "installation"
+
+
 class FieldType(str, enum.Enum):
     BOOL = "bool"
     INT = "int"

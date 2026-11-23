@@ -96,6 +96,13 @@ class UnitIOTypeEnum(str, enum.Enum):
     INPUT = "Input"
 
 
+class UnitIOCompatibilityIssue(str, enum.Enum):
+    TYPE = "type"
+    NULLABLE = "nullable"
+    UNIT = "unit"
+    RANGE = "range"
+
+
 class UnitFirmwareUpdateStatus(str, enum.Enum):
     """
     Unit update status

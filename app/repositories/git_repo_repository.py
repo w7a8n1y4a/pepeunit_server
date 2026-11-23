@@ -17,8 +17,6 @@ from app.dto.enum import (
     GitPlatform,
     JsonPayload,
     NotFoundEntity,
-    ReservedEnvVariableName,
-    StaticRepoFileName,
 )
 from app.repositories.git_platform_repository import (
     GithubPlatformClient,
@@ -482,35 +480,11 @@ class GitRepoRepository:
 
         return target_file.data_stream.read()
 
-    def get_env_dict(self, repo: Repo, commit: str) -> dict:
-        content = self.get_file_bytes(
-            repo, commit, StaticRepoFileName.ENV_EXAMPLE.value
-        )
-        return is_valid_json(content.decode(), JsonPayload.ENV_EXAMPLE)
-
-    def get_env_example(self, repo: Repo, commit: str) -> dict:
-        is_valid_object(commit, NotFoundEntity.COMMIT)
-
-        env_dict = self.get_env_dict(repo, commit)
-        reserved_env_names = [i.value for i in ReservedEnvVariableName]
-
-        return {
-            k: v for k, v in env_dict.items() if k not in reserved_env_names
-        }
-
     def delete_repo(self, repo: Repo) -> None:
         shutil.rmtree(
             self.get_path_physic_repository(repo),
             ignore_errors=True,
         )
-
-    def is_valid_env_file(self, repo: Repo, commit: str, env: dict) -> None:
-        env_example_dict = self.get_env_dict(repo, commit)
-
-        unresolved_set = env_example_dict.keys() - env.keys()
-        if unresolved_set != set():
-            msg = f"This env file has {unresolved_set} unresolved variable"
-            raise GitRepoError(msg, code=ErrorCode.GIT_REPO_ENV_UNRESOLVED)
 
     def is_valid_branch(self, repo: Repo, branch: str):
         available_branches = self.get_branches(repo)

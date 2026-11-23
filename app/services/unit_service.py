@@ -11,6 +11,7 @@ import uuid as uuid_pkg
 import zlib
 
 from fastapi import Depends
+from pydantic import JsonValue, ValidationError
 from sqlalchemy.exc import IntegrityError
 
 from app import runtime, settings
@@ -31,6 +32,7 @@ from app.dto.enum import (
     AgentType,
     BackendTopicCommand,
     DestinationTopicType,
+    FieldKey,
     GlobalPrefixTopic,
     JsonPayload,
     LogLevel,
@@ -65,7 +67,10 @@ from app.schemas.pydantic.unit import (
     UnitUpdate,
 )
 from app.schemas.pydantic.unit_io import UnitIOFilter
-from app.schemas.pydantic.unit_manifest import UnitDefinition
+from app.schemas.pydantic.unit_manifest import (
+    ManifestDictionary,
+    UnitDefinition,
+)
 from app.services.access_service import AccessService
 from app.services.background import BackgroundService
 from app.services.icon_image import IconImage
@@ -73,10 +78,7 @@ from app.services.operation_task_service import OperationTaskService
 from app.services.permission_service import PermissionService
 from app.services.unit_io_service import UnitIOService
 from app.services.unit_manifest_service import UnitManifestService
-from app.services.utils import (
-    get_topic_name,
-    merge_two_dict_first_priority,
-)
+from app.services.utils import get_topic_name
 from app.services.validators import (
     is_valid_json,
     is_valid_object,
@@ -123,9 +125,7 @@ class UnitService:
             creator_uuid=self.access_service.current_agent.uuid,
             **data.model_dump(exclude={"is_compilable_unit"}),
         )
-        selected_commit, _, manifest = self.select_unit_manifest(repo, unit)
-        if not unit.is_auto_update_unit:
-            self.git_repo_repository.get_env_dict(repo, selected_commit)
+        _, _, manifest = self.select_unit_manifest(repo, unit)
 
         try:
             unit.create_datetime = datetime.datetime.now(datetime.UTC)
@@ -212,7 +212,8 @@ class UnitService:
             repo, unit
         )
         if unit.cipher_env_dict:
-            self.refresh_env_for_commit(unit, repo, selected_commit)
+            env = self.generate_unified_env(unit, manifest, selected_commit)
+            self.save_validated_env(unit, manifest, env)
 
         uuid = unit.uuid
         result = self.unit_io_service.synchronize(unit, manifest)
@@ -230,19 +231,13 @@ class UnitService:
                 raise
         return result
 
-    def refresh_env_for_commit(
-        self, unit: Unit, repo: Repo, selected_commit: str
-    ) -> None:
-        env = self.generate_unified_env(unit, repo, selected_commit)
-        self.git_repo_repository.is_valid_env_file(repo, selected_commit, env)
-        unit.cipher_env_dict = aes_gcm_encode(json.dumps(env))
-
     def get_env(self, uuid: uuid_pkg.UUID) -> dict:
         self.access_service.authorization.check_access(
             [AgentType.USER, AgentType.UNIT]
         )
 
         unit = self.unit_repository.get(Unit(uuid=uuid))
+        is_valid_object(unit, NotFoundEntity.UNIT)
 
         self.access_service.authorization.check_ownership(
             unit, [OwnershipType.CREATOR, OwnershipType.UNIT]
@@ -255,19 +250,19 @@ class UnitService:
             self.git_repo_repository.get_selected_commit_and_tag(repo, unit)
         )
 
-        return self.generate_unified_env(
-            unit=unit,
-            repo=repo,
-            selected_commit=selected_commit,
-            user_env_dict=None,
-            include_commit_version=True,
-            filter_by_allowed_keys=True,
+        manifest, _ = self.unit_manifest_service.read_from_commit(
+            repo, selected_commit
         )
+        env = self.generate_unified_env(unit, manifest, selected_commit)
+        if self.access_service.current_agent.type == AgentType.UNIT:
+            self.validate_env(manifest, env)
+        return env
 
     def set_env(self, uuid: uuid_pkg.UUID, env_json_str: str) -> None:
         self.access_service.authorization.check_access([AgentType.USER])
 
-        unit = self.unit_repository.get(Unit(uuid=uuid))
+        unit = self.unit_repository.get(Unit(uuid=uuid), for_update=True)
+        is_valid_object(unit, NotFoundEntity.UNIT)
 
         self.access_service.authorization.check_ownership(
             unit, [OwnershipType.CREATOR]
@@ -280,27 +275,25 @@ class UnitService:
             self.git_repo_repository.get_selected_commit_and_tag(repo, unit)
         )
 
-        env_dict = self.generate_unified_env(
-            unit=unit,
-            repo=repo,
-            selected_commit=selected_commit,
-            user_env_dict=is_valid_json(env_json_str, JsonPayload.ENV),
-            include_commit_version=False,
-            filter_by_allowed_keys=True,
+        manifest, _ = self.unit_manifest_service.read_from_commit(
+            repo, selected_commit
         )
-
-        self.git_repo_repository.is_valid_env_file(
-            repo, selected_commit, env_dict
+        submitted = self.require_env_object(
+            is_valid_json(env_json_str, JsonPayload.ENV)
         )
-
-        unit.cipher_env_dict = aes_gcm_encode(json.dumps(env_dict))
+        env = self.generate_unified_env(
+            unit, manifest, selected_commit, submitted
+        )
+        env.pop(ReservedEnvVariableName.PU_COMMIT_VERSION.value)
+        self.save_validated_env(unit, manifest, env)
         unit.last_update_datetime = datetime.datetime.now(datetime.UTC)
         self.unit_repository.update(unit.uuid, unit)
 
     def reset_env(self, uuid: uuid_pkg.UUID) -> None:
         self.access_service.authorization.check_access([AgentType.USER])
 
-        unit = self.unit_repository.get(Unit(uuid=uuid))
+        unit = self.unit_repository.get(Unit(uuid=uuid), for_update=True)
+        is_valid_object(unit, NotFoundEntity.UNIT)
 
         self.access_service.authorization.check_ownership(
             unit, [OwnershipType.CREATOR]
@@ -348,7 +341,12 @@ class UnitService:
             self.git_repo_repository.get_selected_commit_and_tag(repo, unit)
         )
 
-        return self.generate_current_schema(unit, repo, selected_commit)
+        manifest, dictionary = self.unit_manifest_service.read_from_commit(
+            repo, selected_commit
+        )
+        return self.generate_current_schema(
+            unit, selected_commit, manifest, dictionary
+        )
 
     def get_unit_firmware(self, uuid: uuid_pkg.UUID) -> str:
         self.access_service.authorization.check_access(
@@ -368,13 +366,14 @@ class UnitService:
             self.git_repo_repository.get_selected_commit_and_tag(repo, unit)
         )
 
-        env_dict = self.generate_unified_env(unit, repo, selected_commit)
-        self.git_repo_repository.is_valid_env_file(
-            repo, selected_commit, env_dict
+        manifest, dictionary = self.unit_manifest_service.read_from_commit(
+            repo, selected_commit
         )
+        env_dict = self.generate_unified_env(unit, manifest, selected_commit)
+        self.validate_env(manifest, env_dict)
 
         new_schema_dict = self.generate_current_schema(
-            unit, repo, selected_commit
+            unit, selected_commit, manifest, dictionary
         )
 
         gen_uuid = uuid_pkg.uuid4()
@@ -675,12 +674,10 @@ class UnitService:
     def generate_current_schema(
         self,
         unit: Unit,
-        repo: Repo,
         selected_commit: str,
+        manifest: UnitDefinition,
+        dictionary: ManifestDictionary,
     ) -> dict:
-        manifest, dictionary = self.unit_manifest_service.read_from_commit(
-            repo, selected_commit
-        )
         addresses = {}
         for (
             io_uuid,
@@ -766,73 +763,79 @@ class UnitService:
     def generate_unified_env(
         self,
         unit: Unit,
-        repo: Repo,
+        manifest: UnitDefinition,
         selected_commit: str,
-        user_env_dict: dict | None = None,
-        include_commit_version: bool = True,
-        filter_by_allowed_keys: bool = True,
-    ) -> dict:
-        """
-        Priority, 1-Upper, 4-Lower:
-        1. user_env_dict - env, user write env
-        2. current_env_dict - env of unit.cipher_env_dict - if exist
-        3. gen_env_dict - pepeunit generating env
-        4. target_env_dict - programmer unit template from repository - env_example.json
-
-        """
-        target_env_dict = self.git_repo_repository.get_env_dict(
-            repo, selected_commit
-        )
-
-        gen_env_dict = self.gen_env_dict(unit.uuid)
-
-        current_env_dict = None
+        user_env_dict: dict[str, JsonValue] | None = None,
+    ) -> dict[str, JsonValue]:
+        defaults = {
+            name: field[FieldKey.DEFAULT]
+            for name, field in manifest.env.items()
+            if FieldKey.DEFAULT in field
+            and name not in ReservedEnvVariableName
+        }
+        generated = self.gen_env_dict(unit.uuid)
+        saved = {}
         if unit.cipher_env_dict:
-            current_env_dict = is_valid_json(
-                aes_gcm_decode(unit.cipher_env_dict), JsonPayload.CIPHER_ENV
+            saved = self.require_env_object(
+                is_valid_json(
+                    aes_gcm_decode(unit.cipher_env_dict),
+                    JsonPayload.CIPHER_ENV,
+                )
             )
+        values = defaults | generated | saved | (user_env_dict or {})
+        allowed = generated.keys() | manifest.env.keys()
+        env = {
+            name: value for name, value in values.items() if name in allowed
+        }
+        env[ReservedEnvVariableName.PU_COMMIT_VERSION.value] = selected_commit
+        return env
 
-        merged_env_dict = target_env_dict.copy()
+    @staticmethod
+    def require_env_object(env: JsonValue) -> dict[str, JsonValue]:
+        if not isinstance(env, dict):
+            msg = "Unit settings must be a JSON object"
+            raise UnitError(msg, code=ErrorCode.GIT_REPO_ENV_JSON_INVALID)
+        return env
 
-        merged_env_dict = merge_two_dict_first_priority(
-            gen_env_dict, merged_env_dict
-        )
+    @staticmethod
+    def validate_env(
+        manifest: UnitDefinition, env: dict[str, JsonValue]
+    ) -> None:
+        fields = {
+            name: field
+            for name, field in manifest.env.items()
+            if name not in ReservedEnvVariableName
+        }
+        missing = [
+            name
+            for name, field in fields.items()
+            if name not in env and not field[FieldKey.OPTIONAL]
+        ]
+        if missing:
+            msg = f"Required Unit settings are missing: {', '.join(missing)}"
+            raise UnitError(msg, code=ErrorCode.GIT_REPO_ENV_UNRESOLVED)
+        try:
+            for name, field in fields.items():
+                if name in env:
+                    manifest.validate_literal(
+                        field, env[name], (FieldKey.ENV, name)
+                    )
+            json.dumps(env, allow_nan=False)
+        except ValidationError as error:
+            raise UnitError(
+                str(error), code=ErrorCode.GIT_REPO_ENV_JSON_INVALID
+            ) from error
+        except ValueError as error:
+            msg = "Unit settings must contain finite JSON values"
+            raise UnitError(
+                msg, code=ErrorCode.GIT_REPO_ENV_JSON_INVALID
+            ) from error
 
-        if current_env_dict:
-            merged_env_dict = merge_two_dict_first_priority(
-                current_env_dict, merged_env_dict
-            )
-
-        if user_env_dict:
-            merged_env_dict = merge_two_dict_first_priority(
-                user_env_dict, merged_env_dict
-            )
-
-        if (
-            ReservedEnvVariableName.PU_COMMIT_VERSION.value in merged_env_dict
-            and not include_commit_version
-        ):
-            del merged_env_dict[
-                ReservedEnvVariableName.PU_COMMIT_VERSION.value
-            ]
-
-        if filter_by_allowed_keys:
-            env_example_dict = self.git_repo_repository.get_env_example(
-                repo, selected_commit
-            )
-            allowed_keys = set(env_example_dict.keys()) | set(
-                gen_env_dict.keys()
-            )
-            merged_env_dict = {
-                k: v for k, v in merged_env_dict.items() if k in allowed_keys
-            }
-
-        if include_commit_version:
-            merged_env_dict[
-                ReservedEnvVariableName.PU_COMMIT_VERSION.value
-            ] = selected_commit
-
-        return merged_env_dict
+    def save_validated_env(
+        self, unit: Unit, manifest: UnitDefinition, env: dict[str, JsonValue]
+    ) -> None:
+        self.validate_env(manifest, env)
+        unit.cipher_env_dict = aes_gcm_encode(json.dumps(env))
 
     @staticmethod
     def is_valid_update_rule(data: Unit | UnitCreate) -> None:

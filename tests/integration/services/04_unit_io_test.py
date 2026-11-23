@@ -9,7 +9,6 @@ from app import runtime
 from app.configs.errors import DataPipeError, UnitIOError, ValidationError
 from app.dto.enum import (
     DataPipeStage,
-    GlobalPrefixTopic,
     ProcessingPolicyType,
     UnitIOTypeEnum,
     VisibilityLevel,
@@ -345,32 +344,18 @@ def test_get_many_unit_io(live_units, regular_user_token, database, cc) -> None:
     assert len(units_io) == min(count, runtime.get().pu_instance_max_pagination_size)
 
 
-async def test_data_pipe_requires_pepeunit_suffix(
+async def test_data_pipe_rejects_standard_io(
     crud_unit, regular_user_token, database, cc
 ) -> None:
     service = unit_io_service(database, cc, regular_user_token)
     _, nodes = service.list(
         UnitIOFilter(unit_uuid=crud_unit.uuid, type=[UnitIOTypeEnum.INPUT])
     )
-    target = nodes[0]
-    original_topic = target.topic_name
-    suffix = GlobalPrefixTopic.BACKEND_SUB_PREFIX.value
-    stripped = (
-        original_topic[: -len(suffix)]
-        if original_topic.endswith(suffix)
-        else original_topic
-    )
-    target.topic_name = stripped or "input"
-    service.unit_io_repository.update(target.uuid, target)
-    try:
-        with pytest.raises(DataPipeError):
-            await service.update(
-                target.uuid, UnitIOUpdate(is_data_pipe_active=True)
-            )
-    finally:
-        restored = service.get(target.uuid)
-        restored.topic_name = original_topic
-        service.unit_io_repository.update(restored.uuid, restored)
+    target = next(node for node in nodes if node.topic_name == "reset")
+    with pytest.raises(DataPipeError):
+        await service.update(
+            target.uuid, UnitIOUpdate(is_data_pipe_active=True)
+        )
 
 
 def test_delete_unit(crud_unit, regular_user_token, database, cc) -> None:
@@ -468,7 +453,7 @@ async def test_delete_data_pipe_data(
         (piped_units.time_window_unit, ProcessingPolicyType.TIME_WINDOW),
     ]
     for target_unit, policy in clickhouse_units:
-        # emulators publish to output/pepeunit only, so an input node gets no
+        # emulators publish to output_counter only, so an input node gets no
         # rows while ClickHouse applies the delete mutation
         _, input_unit_io = service.list(
             UnitIOFilter(unit_uuid=target_unit.uuid, type=[UnitIOTypeEnum.INPUT])

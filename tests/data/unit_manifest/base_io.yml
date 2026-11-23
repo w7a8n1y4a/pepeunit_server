@@ -9,13 +9,3 @@ search:
 
 docs: {}
 env: {}
-
-input:
-  update: {}
-  env_update: {}
-  schema_update: {}
-  log_sync: {}
-  reset: {}
-output:
-  state: {}
-  log: {}

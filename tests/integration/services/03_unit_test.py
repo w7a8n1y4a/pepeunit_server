@@ -601,7 +601,9 @@ def test_convert_unit_manifest_to_md(regular_user_token, database) -> None:
     assert "## Environment" in md
     assert "## Input" in md
     assert "## Output" in md
-    assert '"base": "reset"' in md
+    assert '"reset": {' in md
+    assert '"log": {' in md
+    assert '"base":' not in md
     assert '"COMMAND"' in md
 
     maximum = service.MAX_UPLOAD_BYTES

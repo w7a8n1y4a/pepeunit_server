@@ -13,10 +13,7 @@ docs:
   installation: Connect the external probe to the GPIO selected by PROBE_PIN.
 
 env:
-  PROBE_PIN: {type: int, min: 0, example: 4}
-
-input:
-  reset: {}
+  PROBE_PIN: {type: int, min: 0, max: 39, example: 4}
 
 output:
   temperature: {type: float, unit: Cel}

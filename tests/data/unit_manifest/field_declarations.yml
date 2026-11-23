@@ -8,13 +8,12 @@ search:
   description: Demonstrates field constraints and MQTT payload encodings.
 
 env:
-  ENABLED: {type: bool, default: true}
+  ENABLED: {type: bool, enum: [true, false], default: true}
   RETRIES: {type: int, min: 0, max: 5, default: 3, example: 0}
-  LABEL: {type: string, max_bytes: 16, nullable: true, default: null}
-  TOKEN: {type: string, max_bytes: 128, secret: true}
+  LABEL: {type: string, max_length: 16, nullable: true, default: null}
+  TOKEN: {type: string, max_length: 128, secret: true}
 
 input:
-  reset: {}
   target:
     type: string
     format: uuid

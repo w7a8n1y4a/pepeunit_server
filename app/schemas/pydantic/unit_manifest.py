@@ -1,9 +1,9 @@
 import json
-import re
 import uuid as uuid_pkg
 from collections.abc import Collection
 from copy import deepcopy
 from math import isfinite
+from re import Pattern
 from typing import NotRequired, TypedDict
 
 from pydantic import BaseModel, Field, JsonValue, ValidationError
@@ -25,6 +25,7 @@ class FieldDeclaration(TypedDict, total=False):
     min: int | float
     max: int | float
     max_bytes: int
+    max_length: int
     min_items: int
     max_items: int
     enum: list[JsonValue]
@@ -107,19 +108,14 @@ class UnitDefinition(ManifestContractHeader):
             )
 
     def resolve_fields(self, dictionary: ManifestDictionary) -> None:
-        for name in self.output:
-            self.require_field(
-                name not in self.input,
-                (FieldKey.OUTPUT, name),
-                "IO names must be unique across Input and Output",
-            )
         reserved_names = dictionary.input.keys() | dictionary.output.keys()
         for section in (FieldKey.ENV, FieldKey.INPUT, FieldKey.OUTPUT):
             declarations = getattr(self, section)
-            for name in declarations:
-                field = declarations[name]
-                if section != FieldKey.ENV and name in reserved_names:
-                    definitions = getattr(dictionary, section)
+            if section != FieldKey.ENV:
+                definitions = getattr(dictionary, section)
+                for name, field in declarations.items():
+                    if name not in reserved_names:
+                        continue
                     path = (section, name)
                     self.require_field(
                         name in definitions,
@@ -131,9 +127,15 @@ class UnitDefinition(ManifestContractHeader):
                         path,
                         "Reserved IO declarations must be empty",
                     )
-                    field = deepcopy(definitions[name])
-                    declarations[name] = field
+                declarations.update(deepcopy(definitions))
+            for field in declarations.values():
                 self.apply_field_defaults(field, dictionary, section)
+        for name in self.output:
+            self.require_field(
+                name not in self.input,
+                (FieldKey.OUTPUT, name),
+                "IO names must be unique across Input and Output",
+            )
 
     def apply_field_defaults(
         self,
@@ -143,7 +145,10 @@ class UnitDefinition(ManifestContractHeader):
     ) -> None:
         for key in (FieldKey.OPTIONAL, FieldKey.NULLABLE):
             field.setdefault(key, dictionary.defaults[key])
-        if field.get(FieldKey.TYPE) == FieldType.OBJECT:
+        if (
+            field.get(FieldKey.TYPE) == FieldType.OBJECT
+            and section != FieldKey.ENV
+        ):
             field.setdefault(
                 FieldKey.EXTRA, dictionary.defaults[FieldKey.EXTRA]
             )
@@ -159,24 +164,41 @@ class UnitDefinition(ManifestContractHeader):
             field.setdefault(
                 FieldKey.ROUTING, dictionary.defaults[FieldKey.ROUTING]
             )
+        nested_section = FieldKey.ENV if section == FieldKey.ENV else None
         for child in field.get(FieldKey.FIELDS, {}).values():
-            self.apply_field_defaults(child, dictionary)
+            self.apply_field_defaults(child, dictionary, nested_section)
         if FieldKey.ITEMS in field:
-            self.apply_field_defaults(field[FieldKey.ITEMS], dictionary)
+            self.apply_field_defaults(
+                field[FieldKey.ITEMS], dictionary, nested_section
+            )
         for declarations in field.get(FieldKey.VARIANTS, {}).values():
             for child in declarations.values():
-                self.apply_field_defaults(child, dictionary)
+                self.apply_field_defaults(child, dictionary, nested_section)
 
     def validate_fields(self, dictionary: ManifestDictionary) -> None:
         for section in (FieldKey.ENV, FieldKey.INPUT, FieldKey.OUTPUT):
+            name_pattern = (
+                dictionary.name_patterns.env
+                if section == FieldKey.ENV
+                else dictionary.name_patterns.io
+            )
             for name, declaration in getattr(self, section).items():
+                self.require_field(
+                    name_pattern.fullmatch(name) is not None,
+                    (section, name),
+                    f"Name must match {name_pattern.pattern}",
+                )
                 if section == FieldKey.ENV:
-                    self.require_field(
-                        re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
-                        is not None,
-                        (section, name),
-                        "Environment variable name is invalid",
-                    )
+                    try:
+                        json.dumps(declaration, ensure_ascii=False).encode(
+                            "utf-8"
+                        )
+                    except UnicodeEncodeError:
+                        self.require_field(
+                            False,
+                            (section, name),
+                            "Environment schema must be UTF-8",
+                        )
                 self.validate_field(declaration, dictionary, (section, name))
 
     def validate_field(
@@ -204,6 +226,7 @@ class UnitDefinition(ManifestContractHeader):
                 FieldType.ANY,
                 FieldType.BYTES,
             ),
+            FieldKey.MAX_LENGTH: (FieldType.STRING,),
             FieldKey.MIN_ITEMS: (FieldType.ARRAY,),
             FieldKey.MAX_ITEMS: (FieldType.ARRAY,),
             FieldKey.ITEMS: (FieldType.ARRAY,),
@@ -223,6 +246,12 @@ class UnitDefinition(ManifestContractHeader):
                 self.require_field(
                     kind in kinds, (*path, key), f"Not allowed for type {kind}"
                 )
+        if path[0] == FieldKey.ENV:
+            self.validate_env_limits(field, kind, path)
+        elif FieldKey.MAX_LENGTH in field:
+            self.require_field(
+                False, (*path, FieldKey.MAX_LENGTH), "max_length is env-only"
+            )
         self.validate_limits(field, path)
         if FieldKey.UNIT in field:
             self.require_field(
@@ -256,6 +285,44 @@ class UnitDefinition(ManifestContractHeader):
         self.validate_transport(field, dictionary, path)
         self.validate_nested(field, dictionary, path)
         self.validate_literals(field, path)
+
+    def validate_env_limits(
+        self,
+        field: FieldDeclaration,
+        kind: str,
+        path: tuple[str | int, ...],
+    ) -> None:
+        required = {
+            FieldType.BOOL: (FieldKey.ENUM,),
+            FieldType.INT: (FieldKey.MIN, FieldKey.MAX),
+            FieldType.FLOAT: (FieldKey.MIN, FieldKey.MAX),
+            FieldType.STRING: (FieldKey.MAX_LENGTH,),
+            FieldType.ARRAY: (FieldKey.MAX_ITEMS,),
+            FieldType.OBJECT: (FieldKey.EXTRA,),
+        }
+        self.require_choice(kind, required.keys(), (*path, FieldKey.TYPE))
+        self.require_field(
+            FieldKey.MAX_BYTES not in field,
+            (*path, FieldKey.MAX_BYTES),
+            "Use max_length for env strings",
+        )
+        keys = required[FieldType(kind)]
+        if kind in (FieldType.INT, FieldType.FLOAT) and FieldKey.ENUM in field:
+            keys = ()
+        for key in keys:
+            self.require_field(key in field, (*path, key), "Required in env")
+        if kind == FieldType.OBJECT:
+            self.require_field(
+                field[FieldKey.EXTRA] is False,
+                (*path, FieldKey.EXTRA),
+                "Environment objects require extra: false",
+            )
+        if kind == FieldType.BOOL:
+            self.require_field(
+                all(isinstance(value, bool) for value in field[FieldKey.ENUM]),
+                (*path, FieldKey.ENUM),
+                "Boolean enum values must be true or false",
+            )
 
     def validate_nested(
         self,
@@ -330,6 +397,7 @@ class UnitDefinition(ManifestContractHeader):
             )
         for key in (
             FieldKey.MAX_BYTES,
+            FieldKey.MAX_LENGTH,
             FieldKey.MIN_ITEMS,
             FieldKey.MAX_ITEMS,
         ):
@@ -466,8 +534,27 @@ class UnitDefinition(ManifestContractHeader):
                 path,
                 "Value is outside item limits",
             )
+        self.validate_literal_size(field, value, path)
+        if field.get(FieldKey.FORMAT) == FieldFormat.UUID:
+            try:
+                uuid_pkg.UUID(value)
+            except ValueError:
+                self.require_field(False, path, "Value must be a UUID")
+
+    def validate_literal_size(
+        self,
+        field: FieldDeclaration,
+        value: JsonValue,
+        path: tuple[str | int, ...],
+    ) -> None:
+        if isinstance(value, str) and FieldKey.MAX_LENGTH in field:
+            self.require_field(
+                len(value) <= field[FieldKey.MAX_LENGTH],
+                path,
+                "Value exceeds max_length",
+            )
         if FieldKey.MAX_BYTES in field and (
-            kind == FieldType.ANY or isinstance(value, str)
+            field[FieldKey.TYPE] == FieldType.ANY or isinstance(value, str)
         ):
             try:
                 text = (
@@ -477,7 +564,7 @@ class UnitDefinition(ManifestContractHeader):
                         allow_nan=False,
                         separators=(",", ":"),
                     )
-                    if kind == FieldType.ANY
+                    if field[FieldKey.TYPE] == FieldType.ANY
                     else value
                 )
                 size = len(text.encode("utf-8"))
@@ -489,11 +576,6 @@ class UnitDefinition(ManifestContractHeader):
                 path,
                 "Value exceeds max_bytes",
             )
-        if field.get(FieldKey.FORMAT) == FieldFormat.UUID:
-            try:
-                uuid_pkg.UUID(value)
-            except ValueError:
-                self.require_field(False, path, "Value must be a UUID")
 
     def validate_nested_literal(
         self,
@@ -580,7 +662,13 @@ class ManifestDefaults(TypedDict):
     qos: int
 
 
+class ManifestNamePatterns(BaseModel):
+    io: Pattern[str]
+    env: Pattern[str]
+
+
 class ManifestDictionary(ManifestContractHeader):
+    name_patterns: ManifestNamePatterns
     unit_types: list[str]
     execution_types: list[str]
     types: list[str]

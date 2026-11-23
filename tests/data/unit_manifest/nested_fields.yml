@@ -10,13 +10,14 @@ search:
 env:
   PROFILE:
     type: object
+    extra: false
     fields:
-      name: {type: string, max_bytes: 32}
+      name: {type: string, max_length: 32}
       thresholds:
         type: array
         max_items: 4
         items: {type: float, min: -55, max: 125, unit: Cel}
-      note: {type: string, nullable: true, optional: true}
+      note: {type: string, max_length: 64, nullable: true, optional: true}
     default: {name: room, thresholds: [18, 25]}
     example: {name: office, thresholds: [20], note: null}
 

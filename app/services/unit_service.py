@@ -695,11 +695,8 @@ class UnitService:
             links,
         ) in self.unit_io_repository.get_nodes_with_links(unit.uuid):
             addresses[direction, name] = [
-                get_topic_name(io_uuid, name),
-                *(
-                    get_topic_name(link_uuid, link_name)
-                    for link_uuid, link_name in (links or ())
-                ),
+                get_topic_name(io_uuid),
+                *(get_topic_name(link_uuid) for link_uuid, _ in (links or ())),
             ]
 
         schema = {destination: {} for destination in DestinationTopicType}

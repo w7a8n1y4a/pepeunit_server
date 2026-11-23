@@ -8,23 +8,21 @@ search:
   description: Demonstrates reserved IO and defaults across nested schemas.
 
 env:
-  ENABLED: {type: bool, default: false}
-  RETRIES: {type: int, min: 0, default: 0}
-  MESSAGE: {type: string, nullable: true, default: null}
+  ENABLED: {type: bool, enum: [true, false], default: false}
+  RETRIES: {type: int, min: 0, max: 5, default: 0}
+  MESSAGE: {type: string, max_length: 64, nullable: true, default: null}
   PROFILE:
     type: object
-    extra: true
+    extra: false
     fields:
-      name: {type: string, max_bytes: 32}
+      name: {type: string, max_length: 32}
       labels:
         type: array
         max_items: 4
-        items: {type: string, max_bytes: 16}
+        items: {type: string, max_length: 16}
     default: {name: room, labels: []}
 
 input:
-  reset: {}
-  env_update: {}
   relay:
     type: object
     qos: 1
@@ -36,8 +34,6 @@ input:
     example: {action: pulse, duration: 500}
 
 output:
-  state: {}
-  log: {}
   button: {type: string, codec: utf8, qos: 0}
   packet: {type: bytes, max_bytes: 220}
   samples:

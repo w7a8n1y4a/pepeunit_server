@@ -195,6 +195,7 @@ class FieldKey(str, enum.Enum):
     MAX = "max"
     UNIT = "unit"
     MAX_BYTES = "max_bytes"
+    MAX_LENGTH = "max_length"
     MIN_ITEMS = "min_items"
     MAX_ITEMS = "max_items"
     FORMAT = "format"

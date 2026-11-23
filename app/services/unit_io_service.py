@@ -38,6 +38,7 @@ from app.dto.enum import (
     ProcessingPolicyType,
     ReservedEnvVariableName,
     ReservedInputBaseTopic,
+    ReservedOutputBaseTopic,
     UnitFirmwareUpdateStatus,
     UnitIOTypeEnum,
     UuidEntity,
@@ -117,8 +118,14 @@ class UnitIOService:
         return unit_io
 
     @staticmethod
+    def is_standard_topic(name: str) -> bool:
+        return (
+            name in ReservedInputBaseTopic or name in ReservedOutputBaseTopic
+        )
+
+    @classmethod
     def new_unit_io(
-        unit: Unit, direction: UnitIOTypeEnum, name: str
+        cls, unit: Unit, direction: UnitIOTypeEnum, name: str
     ) -> UnitIO:
         now = datetime.datetime.now(datetime.UTC)
         unit_io = UnitIO(
@@ -133,7 +140,7 @@ class UnitIOService:
 
         if (
             runtime.get().pu_datapipe_default_last_value_enable
-            and name.endswith(GlobalPrefixTopic.BACKEND_SUB_PREFIX.value)
+            and not cls.is_standard_topic(name)
         ):
             unit_io.is_data_pipe_active = True
             unit_io.data_pipe_yml = json.dumps(
@@ -199,14 +206,10 @@ class UnitIOService:
             unit_io, [OwnershipType.CREATOR]
         )
 
-        if (
-            not unit_io.topic_name.endswith(
-                GlobalPrefixTopic.BACKEND_SUB_PREFIX.value
-            )
-            and data.is_data_pipe_active
-        ):
-            msg = "DataPipe cannot be activated if the topic does not have the suffix /pepeunit"
-            raise DataPipeError(msg, code=ErrorCode.DATAPIPE_TOPIC_SUFFIX)
+        is_standard_topic = self.is_standard_topic(unit_io.topic_name)
+        if is_standard_topic and data.is_data_pipe_active:
+            msg = "DataPipe cannot be activated for a standard IO"
+            raise DataPipeError(msg, code=ErrorCode.DATAPIPE_STANDARD_IO)
 
         if data.is_rewritable_input is not None:
             self.is_valid_input_unit_io(unit_io)
@@ -234,9 +237,7 @@ class UnitIOService:
         if (
             runtime.get().pu_ff_datapipe_enable
             and data.is_data_pipe_active is not None
-            and unit_io.topic_name.endswith(
-                GlobalPrefixTopic.BACKEND_SUB_PREFIX.value
-            )
+            and not is_standard_topic
         ):
             await send_to_data_pipe_stream(
                 DataPipeConfigAction.UPDATE
@@ -264,9 +265,7 @@ class UnitIOService:
         )
         self.access_service.authorization.check_visibility(unit_io)
 
-        publish_to_topic(
-            get_topic_name(unit_io.uuid, unit_io.topic_name), data.state
-        )
+        publish_to_topic(get_topic_name(unit_io.uuid), data.state)
 
         unit_io.state = data.state
         unit_io.last_update_datetime = datetime.datetime.now(datetime.UTC)

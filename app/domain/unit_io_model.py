@@ -45,7 +45,6 @@ class UnitIO(SQLModel, table=True):
     topic_name: str = Field(nullable=False)
     create_datetime: datetime = Field(nullable=False)
 
-    # last state topic - only for topics with prefix #/pepeunit
     state: str = Field(nullable=True)
     last_update_datetime: datetime = Field(nullable=False)
 

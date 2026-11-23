@@ -1,9 +1,11 @@
 import datetime
 import uuid as uuid_pkg
 from dataclasses import dataclass
+from operator import not_
+from typing import Literal
 
 from fastapi import Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.dto.clickhouse.aggregation import Aggregation
 from app.dto.clickhouse.n_records import NRecords
@@ -11,6 +13,7 @@ from app.dto.clickhouse.time_window import TimeWindow
 from app.dto.enum import (
     AggregationFunctions,
     DataPipeStage,
+    MqttQos,
     OrderByDate,
     ProcessingPolicyType,
     UnitIOTypeEnum,
@@ -18,6 +21,17 @@ from app.dto.enum import (
 )
 from app.schemas.pydantic.pagination import BasePaginationRestMixin
 from app.utils.utils import parse_interval
+
+
+class UnitIOTopicRead(BaseModel):
+    topic: str
+    qos: MqttQos = Field(MqttQos.AT_MOST_ONCE, exclude_if=not_)
+
+
+class UnitIOTopicsRead(BaseModel):
+    version: Literal[1] = 1
+    input: dict[str, UnitIOTopicRead] = Field(default_factory=dict)
+    output: dict[str, UnitIOTopicRead] = Field(default_factory=dict)
 
 
 class UnitIOUpdate(BaseModel):

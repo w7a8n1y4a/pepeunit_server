@@ -255,6 +255,7 @@ class StaticRepoFileName(str, enum.Enum):
 
     UNIT_MANIFEST = "unit.yml"
     SCHEMA = "schema.json"
+    IO_TOPICS = "io_topics.yml"
     ENV = ".env"
 
 

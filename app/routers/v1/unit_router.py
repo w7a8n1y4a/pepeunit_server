@@ -2,14 +2,15 @@ import logging
 import os
 import uuid as uuid_pkg
 
+import yaml
 from fastapi import APIRouter, Depends, status
 from starlette.background import BackgroundTask
-from starlette.responses import FileResponse, PlainTextResponse
+from starlette.responses import FileResponse, PlainTextResponse, Response
 
 from app.configs.clickhouse import get_hand_clickhouse_client
 from app.configs.db import get_hand_session
 from app.configs.rest import get_unit_service
-from app.dto.enum import AgentType, BackendTopicCommand
+from app.dto.enum import AgentType, BackendTopicCommand, StaticRepoFileName
 from app.schemas.pydantic.shared import MqttRead
 from app.schemas.pydantic.unit import (
     EnvJsonString,
@@ -28,6 +29,11 @@ from app.schemas.pydantic.unit import (
 )
 from app.services.unit_env_serializer import UnitEnvSerializer
 from app.services.unit_service import UnitService
+
+
+class YamlResponse(Response):
+    media_type = "application/yaml"
+
 
 router = APIRouter()
 
@@ -83,6 +89,18 @@ def get_selected_version(
     uuid: uuid_pkg.UUID, unit_service: UnitService = Depends(get_unit_service)
 ):
     return unit_service.get_selected_version(uuid)
+
+
+@router.get("/io_topics/{uuid}", response_class=YamlResponse)
+def get_io_topics(
+    uuid: uuid_pkg.UUID, unit_service: UnitService = Depends(get_unit_service)
+) -> YamlResponse:
+    topics = unit_service.get_io_topics(uuid)
+    filename = StaticRepoFileName.IO_TOPICS.value
+    return YamlResponse(
+        yaml.safe_dump(topics.model_dump(mode="json"), sort_keys=False),
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/get_current_schema/{uuid}", response_model=dict)

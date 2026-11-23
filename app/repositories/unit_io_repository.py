@@ -87,6 +87,17 @@ class UnitIORepository(BaseRepository):
             .first()
         )
 
+    def get_topic_uuids(
+        self, unit_uuid: uuid_pkg.UUID
+    ) -> dict[tuple[str, str], uuid_pkg.UUID]:
+        statement = select(UnitIO.uuid, UnitIO.type, UnitIO.topic_name).where(
+            UnitIO.unit_uuid == unit_uuid
+        )
+        return {
+            (direction, name): io_uuid
+            for io_uuid, direction, name in self.db.exec(statement)
+        }
+
     def get_nodes_with_links(self, unit_uuid: uuid_pkg.UUID) -> list[tuple]:
         link_alias = aliased(Link)
         unit_io_alias = aliased(UnitIO)

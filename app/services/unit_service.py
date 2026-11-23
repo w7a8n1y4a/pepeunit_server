@@ -37,6 +37,7 @@ from app.dto.enum import (
     GlobalPrefixTopic,
     JsonPayload,
     LogLevel,
+    MqttQos,
     NotFoundEntity,
     OperationTaskType,
     OrderByDate,
@@ -68,7 +69,11 @@ from app.schemas.pydantic.unit import (
     UnitRead,
     UnitUpdate,
 )
-from app.schemas.pydantic.unit_io import UnitIOFilter
+from app.schemas.pydantic.unit_io import (
+    UnitIOFilter,
+    UnitIOTopicRead,
+    UnitIOTopicsRead,
+)
 from app.schemas.pydantic.unit_manifest import (
     FieldDeclarations,
     ManifestDictionary,
@@ -239,8 +244,8 @@ class UnitService:
         return result
 
     def get_env(self, uuid: uuid_pkg.UUID) -> dict[str, JsonValue]:
-        unit, selected_commit, manifest, dictionary = self.read_env_manifest(
-            uuid
+        unit, selected_commit, manifest, dictionary = (
+            self.read_owned_unit_manifest(uuid)
         )
         env = self.generate_unified_env(
             unit, manifest, dictionary, selected_commit
@@ -250,8 +255,8 @@ class UnitService:
         return env
 
     def get_env_max_size(self, uuid: uuid_pkg.UUID) -> UnitEnvSizeRead:
-        unit, selected_commit, manifest, dictionary = self.read_env_manifest(
-            uuid
+        unit, selected_commit, manifest, dictionary = (
+            self.read_owned_unit_manifest(uuid)
         )
         fields = self.env_fields(manifest, dictionary)
         runtime_values = self.runtime_env(unit.uuid, selected_commit)
@@ -277,7 +282,7 @@ class UnitService:
             max_chars += len(UnitEnvSerializer.format_line(name, "")) + size
         return UnitEnvSizeRead(max_chars=max_chars)
 
-    def read_env_manifest(
+    def read_owned_unit_manifest(
         self, uuid: uuid_pkg.UUID
     ) -> tuple[Unit, str, UnitDefinition, ManifestDictionary]:
         self.access_service.authorization.check_access(
@@ -366,27 +371,30 @@ class UnitService:
         )
         return SelectedVersionRead(commit=selected_commit, tag=selected_tag)
 
+    def get_io_topics(self, uuid: uuid_pkg.UUID) -> UnitIOTopicsRead:
+        unit, selected_commit, manifest, _ = self.read_owned_unit_manifest(
+            uuid
+        )
+        io_uuids = self.unit_io_repository.get_topic_uuids(unit.uuid)
+        topics = UnitIOTopicsRead()
+        for direction, declarations, entries in (
+            (UnitIOTypeEnum.INPUT, manifest.input, topics.input),
+            (UnitIOTypeEnum.OUTPUT, manifest.output, topics.output),
+        ):
+            for name, field in declarations.items():
+                io_uuid = io_uuids.get((direction, name))
+                if io_uuid is None:
+                    msg = f"UnitIO {direction.value} {name!r} is missing for commit {selected_commit}"
+                    raise UnitIOError(msg, code=ErrorCode.UNIT_IO_NOT_FOUND)
+                entries[name] = UnitIOTopicRead(
+                    topic=f"{settings.pu_domain}/{io_uuid}",
+                    qos=MqttQos(field[FieldKey.QOS]),
+                )
+        return topics
+
     def get_current_schema(self, uuid: uuid_pkg.UUID) -> dict:
-        self.access_service.authorization.check_access(
-            [AgentType.USER, AgentType.UNIT]
-        )
-        unit = self.unit_repository.get(Unit(uuid=uuid))
-
-        is_valid_object(unit, NotFoundEntity.UNIT)
-
-        self.access_service.authorization.check_ownership(
-            unit, [OwnershipType.CREATOR, OwnershipType.UNIT]
-        )
-
-        repo = self.repo_repository.get(Repo(uuid=unit.repo_uuid))
-        is_valid_object(repo, NotFoundEntity.REPO)
-
-        selected_commit, _ = (
-            self.git_repo_repository.get_selected_commit_and_tag(repo, unit)
-        )
-
-        manifest, dictionary = self.unit_manifest_service.read_from_commit(
-            repo, selected_commit
+        unit, selected_commit, manifest, dictionary = (
+            self.read_owned_unit_manifest(uuid)
         )
         return self.generate_current_schema(
             unit, selected_commit, manifest, dictionary

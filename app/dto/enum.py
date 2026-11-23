@@ -101,6 +101,11 @@ class UnitIOCompatibilityIssue(str, enum.Enum):
     NULLABLE = "nullable"
     UNIT = "unit"
     RANGE = "range"
+    LENGTH = "length"
+    REQUIRED_FIELD = "required_field"
+    EXTRA_FIELD = "extra_field"
+    VARIANT = "variant"
+    ENUM = "enum"
 
 
 class UnitFirmwareUpdateStatus(str, enum.Enum):

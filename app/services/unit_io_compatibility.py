@@ -1,8 +1,24 @@
+from collections.abc import Iterable
+from dataclasses import dataclass
 from fractions import Fraction
 
 from app.dto.enum import FieldKey, FieldType, UnitIOCompatibilityIssue
-from app.schemas.pydantic.unit_manifest import FieldDeclaration
+from app.schemas.pydantic.unit_manifest import (
+    FieldDeclaration,
+    FieldDeclarations,
+)
 from app.services.ucum_conversion import UCUMConversion, UCUMUnits
+
+
+@dataclass(frozen=True)
+class UnitIOCompatibilityResult:
+    issue: UnitIOCompatibilityIssue | None = None
+    path: tuple[str, ...] = ()
+    depends_on_value: bool = False
+
+    @property
+    def compatible(self) -> bool:
+        return self.issue is None
 
 
 class UnitIOCompatibility:
@@ -29,6 +45,237 @@ class UnitIOCompatibility:
     def __init__(self) -> None:
         self.units: UCUMUnits | None = None
 
+    def check(
+        self,
+        output: FieldDeclaration,
+        input_field: FieldDeclaration,
+        path: tuple[str, ...] = (),
+    ) -> UnitIOCompatibilityResult:
+        source = FieldType(output[FieldKey.TYPE])
+        target = FieldType(input_field[FieldKey.TYPE])
+        if FieldType.ANY in (source, target):
+            if FieldType.BYTES in (source, target):
+                return UnitIOCompatibilityResult(
+                    UnitIOCompatibilityIssue.TYPE, path
+                )
+            depends_on_value = (
+                source == FieldType.ANY and target != FieldType.ANY
+            )
+            return UnitIOCompatibilityResult(
+                path=path if depends_on_value else (),
+                depends_on_value=depends_on_value,
+            )
+        if source != target or source not in (
+            FieldType.ARRAY,
+            FieldType.OBJECT,
+        ):
+            issue = self.check_scalar(output, input_field)
+            return (
+                UnitIOCompatibilityResult(issue, path)
+                if issue
+                else UnitIOCompatibilityResult()
+            )
+        if self.nullable_mismatch(output, input_field):
+            return UnitIOCompatibilityResult(
+                UnitIOCompatibilityIssue.NULLABLE, path
+            )
+        if source == FieldType.ARRAY:
+            return self.check_array(output, input_field, path)
+        return self.check_object(output, input_field, path)
+
+    def check_array(
+        self,
+        output: FieldDeclaration,
+        input_field: FieldDeclaration,
+        path: tuple[str, ...],
+    ) -> UnitIOCompatibilityResult:
+        if output.get(FieldKey.MIN_ITEMS, 0) < input_field.get(
+            FieldKey.MIN_ITEMS, 0
+        ):
+            return UnitIOCompatibilityResult(
+                UnitIOCompatibilityIssue.LENGTH,
+                (*path, FieldKey.MIN_ITEMS.value),
+            )
+        maximum = output.get(FieldKey.MAX_ITEMS)
+        if FieldKey.MAX_ITEMS in input_field and (
+            maximum is None or maximum > input_field[FieldKey.MAX_ITEMS]
+        ):
+            return UnitIOCompatibilityResult(
+                UnitIOCompatibilityIssue.LENGTH,
+                (*path, FieldKey.MAX_ITEMS.value),
+            )
+        if maximum == 0:
+            return UnitIOCompatibilityResult()
+        return self.check(
+            output[FieldKey.ITEMS],
+            input_field[FieldKey.ITEMS],
+            (*path, FieldKey.ITEMS.value),
+        )
+
+    def check_object(
+        self,
+        output: FieldDeclaration,
+        input_field: FieldDeclaration,
+        path: tuple[str, ...],
+    ) -> UnitIOCompatibilityResult:
+        if FieldKey.VARIANTS in output:
+            return self.combine(
+                self.check_variant(output, input_field, action, path)
+                for action in output[FieldKey.VARIANTS]
+            )
+        if FieldKey.VARIANTS in input_field:
+            return self.check_variant_selector(output, input_field, path)
+        return self.check_object_fields(
+            output.get(FieldKey.FIELDS, {}),
+            input_field.get(FieldKey.FIELDS, {}),
+            output.get(FieldKey.EXTRA, False),
+            input_field.get(FieldKey.EXTRA, False),
+            path,
+        )
+
+    def check_variant_selector(
+        self,
+        output: FieldDeclaration,
+        input_field: FieldDeclaration,
+        path: tuple[str, ...],
+    ) -> UnitIOCompatibilityResult:
+        selector_path = (*path, FieldKey.ACTION.value)
+        selector = output.get(FieldKey.FIELDS, {}).get(FieldKey.ACTION)
+        if selector is None or selector.get(FieldKey.OPTIONAL, False):
+            return UnitIOCompatibilityResult(
+                UnitIOCompatibilityIssue.REQUIRED_FIELD, selector_path
+            )
+        if selector[FieldKey.TYPE] == FieldType.ANY:
+            compatible = any(
+                self.check_variant(
+                    output, input_field, action, path
+                ).compatible
+                for action in input_field[FieldKey.VARIANTS]
+            )
+            return UnitIOCompatibilityResult(
+                issue=None if compatible else UnitIOCompatibilityIssue.VARIANT,
+                path=selector_path,
+                depends_on_value=compatible,
+            )
+        if selector[FieldKey.TYPE] != FieldType.STRING:
+            return UnitIOCompatibilityResult(
+                UnitIOCompatibilityIssue.TYPE, selector_path
+            )
+        if selector.get(FieldKey.NULLABLE, False):
+            return UnitIOCompatibilityResult(
+                UnitIOCompatibilityIssue.NULLABLE, selector_path
+            )
+        if FieldKey.ENUM not in selector:
+            return UnitIOCompatibilityResult(
+                UnitIOCompatibilityIssue.VARIANT, selector_path
+            )
+        return self.combine(
+            self.check_variant(output, input_field, action, path)
+            for action in selector[FieldKey.ENUM]
+            if isinstance(action, str)
+        )
+
+    def check_variant(
+        self,
+        output: FieldDeclaration,
+        input_field: FieldDeclaration,
+        action: str,
+        path: tuple[str, ...],
+    ) -> UnitIOCompatibilityResult:
+        variant_path = (*path, FieldKey.VARIANTS.value, action)
+        selector: FieldDeclaration = {
+            FieldKey.TYPE: FieldType.STRING,
+            FieldKey.ENUM: [action],
+        }
+        source_fields = (
+            output[FieldKey.VARIANTS][action]
+            if FieldKey.VARIANTS in output
+            else output.get(FieldKey.FIELDS, {})
+        ) | {FieldKey.ACTION.value: selector}
+        target_fields = input_field.get(FieldKey.FIELDS, {})
+        if FieldKey.VARIANTS in input_field:
+            variant = input_field[FieldKey.VARIANTS].get(action)
+            if variant is None:
+                return UnitIOCompatibilityResult(
+                    UnitIOCompatibilityIssue.VARIANT, variant_path
+                )
+            target_fields = variant | {FieldKey.ACTION.value: selector}
+        return self.check_object_fields(
+            source_fields,
+            target_fields,
+            output.get(FieldKey.EXTRA, False),
+            input_field.get(FieldKey.EXTRA, False),
+            variant_path,
+        )
+
+    def check_object_fields(
+        self,
+        output_fields: FieldDeclarations,
+        input_fields: FieldDeclarations,
+        output_extra: bool,
+        input_extra: bool,
+        path: tuple[str, ...],
+    ) -> UnitIOCompatibilityResult:
+        if not input_extra:
+            for name in output_fields:
+                if name not in input_fields:
+                    return UnitIOCompatibilityResult(
+                        UnitIOCompatibilityIssue.EXTRA_FIELD, (*path, name)
+                    )
+            if output_extra:
+                return UnitIOCompatibilityResult(
+                    UnitIOCompatibilityIssue.EXTRA_FIELD,
+                    (*path, FieldKey.EXTRA.value),
+                )
+        return self.combine(
+            self.check_object_field(
+                output_fields.get(name),
+                input_field,
+                output_extra,
+                (*path, name),
+            )
+            for name, input_field in input_fields.items()
+        )
+
+    def check_object_field(
+        self,
+        output: FieldDeclaration | None,
+        input_field: FieldDeclaration,
+        output_extra: bool,
+        path: tuple[str, ...],
+    ) -> UnitIOCompatibilityResult:
+        if not input_field.get(FieldKey.OPTIONAL, False) and (
+            output is None or output.get(FieldKey.OPTIONAL, False)
+        ):
+            return UnitIOCompatibilityResult(
+                UnitIOCompatibilityIssue.REQUIRED_FIELD, path
+            )
+        if output is None:
+            if not output_extra:
+                return UnitIOCompatibilityResult()
+            output = {FieldKey.TYPE: FieldType.ANY}
+        return self.check(output, input_field, path)
+
+    @staticmethod
+    def combine(
+        results: Iterable[UnitIOCompatibilityResult],
+    ) -> UnitIOCompatibilityResult:
+        result = UnitIOCompatibilityResult()
+        for candidate in results:
+            if not candidate.compatible:
+                return candidate
+            if candidate.depends_on_value and not result.depends_on_value:
+                result = candidate
+        return result
+
+    @staticmethod
+    def nullable_mismatch(
+        output: FieldDeclaration, input_field: FieldDeclaration
+    ) -> bool:
+        return output.get(FieldKey.NULLABLE, False) and not input_field.get(
+            FieldKey.NULLABLE, False
+        )
+
     def check_scalar(
         self, output: FieldDeclaration, input_field: FieldDeclaration
     ) -> UnitIOCompatibilityIssue | None:
@@ -36,14 +283,25 @@ class UnitIOCompatibility:
         target = FieldType(input_field[FieldKey.TYPE])
         if target not in self.SCALAR_TARGETS.get(source, ()):
             return UnitIOCompatibilityIssue.TYPE
-        if (
-            output.get(FieldKey.NULLABLE, False)
-            and not input_field.get(FieldKey.NULLABLE, False)
-            and target != FieldType.ANY
+        if target != FieldType.ANY and self.nullable_mismatch(
+            output, input_field
         ):
             return UnitIOCompatibilityIssue.NULLABLE
         if target in self.NUMERIC_TYPES:
             return self.check_range(output, input_field, source, target)
+        if (
+            source == target == FieldType.STRING
+            and FieldKey.ENUM in input_field
+            and (
+                FieldKey.ENUM not in output
+                or any(
+                    value is not None
+                    and value not in input_field[FieldKey.ENUM]
+                    for value in output[FieldKey.ENUM]
+                )
+            )
+        ):
+            return UnitIOCompatibilityIssue.ENUM
         return None
 
     def check_range(

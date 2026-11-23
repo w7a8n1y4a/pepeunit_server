@@ -26,6 +26,7 @@ from app.dto.enum import (
     OperationTaskType,
     OwnershipType,
     RepoStatus,
+    StaticRepoFileName,
     UserRole,
 )
 from app.repositories.git_platform_repository import (
@@ -57,6 +58,7 @@ from app.services.background import BackgroundService
 from app.services.icon_image import IconImage
 from app.services.operation_task_service import OperationTaskService
 from app.services.permission_service import PermissionService
+from app.services.unit_manifest_service import UnitManifestService
 from app.services.validators import (
     is_valid_json,
     is_valid_object,
@@ -74,6 +76,7 @@ class RepoService:
         operation_task_service: OperationTaskService = Depends(),
         permission_service: PermissionService = Depends(),
         access_service: AccessService = Depends(),
+        unit_manifest_service: UnitManifestService = Depends(),
     ) -> None:
         self.repo_repository = repo_repository
         self.icon_repository = icon_repository
@@ -83,6 +86,7 @@ class RepoService:
         self.git_repo_repository = GitRepoRepository()
         self.permission_service = permission_service
         self.access_service = access_service
+        self.unit_manifest_service = unit_manifest_service
 
     def get_platform(
         self,
@@ -399,6 +403,7 @@ class RepoService:
                 delete_path=repo_save_path,
             )
             repo.local_repository_size = repository_size
+            self.refresh_front_unit_yml(repo)
 
             repo.sync_status = RepoStatus.UPDATED
             repo.sync_error = None
@@ -407,6 +412,26 @@ class RepoService:
             repo.sync_error = e.message
 
         return self.repo_repository.update(repo.uuid, repo)
+
+    def refresh_front_unit_yml(self, repo: Repo) -> None:
+        repo.is_have_front_unit_yml = False
+        repo.front_unit_yml_search = None
+        front_commit = self.git_repo_repository.get_front_commit(repo)
+        if front_commit is None:
+            return
+
+        try:
+            content = self.git_repo_repository.get_file_bytes(
+                repo, front_commit, StaticRepoFileName.UNIT_MANIFEST.value
+            )
+        except GitRepoError as error:
+            if error.error_code == ErrorCode.GIT_REPO_FILE_NOT_FOUND:
+                return
+            raise
+
+        repo.is_have_front_unit_yml = True
+        manifest, _ = self.unit_manifest_service.parse_repo_manifest(content)
+        repo.front_unit_yml_search = manifest.search.model_dump(mode="json")
 
     def update_local_repository(self, uuid: uuid_pkg.UUID) -> str:
         repo = self.repo_repository.get(Repo(uuid=uuid))

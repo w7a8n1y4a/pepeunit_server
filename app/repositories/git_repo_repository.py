@@ -146,6 +146,25 @@ class GitRepoRepository:
         shutil.copytree(self.get_path_physic_repository(repo), tmp_path)
         return self._open(tmp_path)
 
+    def get_front_commit(self, repo: Repo) -> str | None:
+        git_repo = self.get_repo(repo)
+        try:
+            tag = git_repo.git.for_each_ref(
+                "--sort=refname",
+                "--sort=-creatordate",
+                "--count=1",
+                "--format=%(refname)",
+                "refs/tags",
+            )
+            if not tag and not git_repo.head.is_valid():
+                return None
+            return git_repo.commit(tag or "HEAD").hexsha
+        except (BadName, BadObject, GitCommandError, ValueError) as error:
+            msg = f"Cannot determine front commit for repo {repo.uuid}"
+            raise GitRepoError(
+                msg, code=ErrorCode.GIT_REPO_COMMIT_NOT_FOUND
+            ) from error
+
     def get_branches(self, repo: Repo) -> list[str]:
         return [r.remote_head for r in self.get_repo(repo).remote().refs][1:]
 

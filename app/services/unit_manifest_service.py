@@ -37,6 +37,11 @@ class UnitManifestService:
         content = self.git_repo_repository.get_file_bytes(
             repo, selected_commit, StaticRepoFileName.UNIT_MANIFEST.value
         )
+        return self.parse_repo_manifest(content)
+
+    def parse_repo_manifest(
+        self, content: bytes
+    ) -> tuple[UnitDefinition, ManifestDictionary]:
         try:
             return self.parse(content)
         except ValidationError as error:

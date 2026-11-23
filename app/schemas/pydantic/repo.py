@@ -16,6 +16,7 @@ from app.dto.enum import (
     RepoStatus,
 )
 from app.schemas.pydantic.pagination import BasePaginationRestMixin
+from app.schemas.pydantic.unit_manifest import ManifestSearch
 
 
 class Credentials(BaseModel):
@@ -48,6 +49,9 @@ class RepoRead(BaseModel):
 
     local_repository_size: int
 
+    is_have_front_unit_yml: bool = False
+    front_unit_yml_search: ManifestSearch | None = None
+
     sync_status: RepoStatus | None = None
     sync_error: str | None = None
     sync_last_datetime: datetime | None = None
@@ -74,6 +78,7 @@ class RepoFilter(BasePaginationRestMixin):
     search_string: str | None = None
 
     is_public_repository: bool | None = None
+    is_have_front_unit_yml: bool | None = None
 
     order_by_create_date: OrderByDate | None = OrderByDate.desc
     order_by_last_update: OrderByDate | None = OrderByDate.desc

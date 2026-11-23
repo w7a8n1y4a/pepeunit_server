@@ -2,8 +2,9 @@ import json
 import uuid as uuid_pkg
 from datetime import datetime
 
+from pydantic import JsonValue
 from sqlalchemy import Column, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlmodel import Field, SQLModel
 
 from app.domain.icon_model import Icon
@@ -55,6 +56,11 @@ class Repo(SQLModel, table=True):
     releases_data: str = Field(nullable=True, default=None)
     # size on disk in bytes, for git repository
     local_repository_size: int = Field(nullable=False, default=0)
+
+    is_have_front_unit_yml: bool = Field(default=False, nullable=False)
+    front_unit_yml_search: dict[str, JsonValue] | None = Field(
+        default=None, sa_column=Column(JSONB(none_as_null=True), nullable=True)
+    )
 
     # last sync status
     sync_status: str = Field(nullable=True)

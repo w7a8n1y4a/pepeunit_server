@@ -182,6 +182,7 @@ class ServiceFactory:
             operation_task_service=self.get_operation_task_service(),
             permission_service=self.permission_service,
             access_service=self.access_service,
+            unit_manifest_service=self.get_unit_manifest_service(),
         )
 
     def get_unit_manifest_service(self) -> UnitManifestService:

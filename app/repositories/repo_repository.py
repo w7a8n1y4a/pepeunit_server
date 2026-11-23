@@ -18,6 +18,7 @@ from app.repositories.utils import (
     apply_orders_by,
 )
 from app.schemas.pydantic.repo import RepoFilter
+from app.schemas.pydantic.unit_manifest import ManifestSearch
 from app.services.validators import is_valid_uuid
 
 
@@ -61,7 +62,18 @@ class RepoRepository(BaseRepository):
                 Repo.is_public_repository == filters.is_public_repository
             )
 
-        fields = [Repo.repository_url]
+        if filters.is_have_front_unit_yml is not None:
+            query = query.filter(
+                Repo.is_have_front_unit_yml == filters.is_have_front_unit_yml
+            )
+
+        fields = [
+            Repo.repository_url,
+            *(
+                Repo.front_unit_yml_search[field].astext
+                for field in ManifestSearch.model_fields
+            ),
+        ]
         query = apply_ilike_search_string(query, filters, fields)
 
         fields = {

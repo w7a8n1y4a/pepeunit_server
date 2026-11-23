@@ -11,16 +11,15 @@ import uuid as uuid_pkg
 import zlib
 
 from fastapi import Depends
-from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 
 from app import runtime, settings
 from app.configs.error_codes import ErrorCode
 from app.configs.errors import (
-    GitRepoError,
     MqttError,
     NoAccessError,
     UnitError,
+    UnitIOError,
 )
 from app.domain.operation_task_model import OperationTask
 from app.domain.repo_model import Repo
@@ -32,6 +31,7 @@ from app.dto.enum import (
     AgentType,
     BackendTopicCommand,
     DestinationTopicType,
+    GlobalPrefixTopic,
     JsonPayload,
     LogLevel,
     NotFoundEntity,
@@ -153,7 +153,9 @@ class UnitService:
         selected_commit, selected_tag = (
             self.git_repo_repository.get_selected_commit_and_tag(repo, unit)
         )
-        manifest = self.read_unit_manifest(repo, selected_commit)
+        manifest, _ = self.unit_manifest_service.read_from_commit(
+            repo, selected_commit
+        )
         if unit.is_auto_update_unit:
             unit.target_commit = None
         unit.is_compilable_unit = manifest.is_compilable
@@ -168,19 +170,6 @@ class UnitService:
             (selected_commit, selected_tag),
         )
         return selected_commit, selected_tag, manifest
-
-    def read_unit_manifest(
-        self, repo: Repo, selected_commit: str
-    ) -> UnitDefinition:
-        content = self.git_repo_repository.get_file_bytes(
-            repo, selected_commit, StaticRepoFileName.UNIT_MANIFEST.value
-        )
-        try:
-            return self.unit_manifest_service.parse(content)
-        except ValidationError as error:
-            raise GitRepoError(
-                str(error), code=ErrorCode.GIT_REPO_UNIT_MANIFEST_INVALID
-            ) from error
 
     def get(self, uuid: uuid_pkg.UUID) -> Unit:
         self.access_service.authorization.check_access(
@@ -379,9 +368,13 @@ class UnitService:
             self.git_repo_repository.get_selected_commit_and_tag(repo, unit)
         )
 
-        env_dict = self.get_env(unit.uuid)
+        env_dict = self.generate_unified_env(unit, repo, selected_commit)
         self.git_repo_repository.is_valid_env_file(
             repo, selected_commit, env_dict
+        )
+
+        new_schema_dict = self.generate_current_schema(
+            unit, repo, selected_commit
         )
 
         gen_uuid = uuid_pkg.uuid4()
@@ -394,18 +387,10 @@ class UnitService:
                 repo, selected_commit, gen_uuid
             )
 
-        env_dict[ReservedEnvVariableName.PU_COMMIT_VERSION.value] = (
-            selected_commit
-        )
-
         with open(
             f"{tmp_git_repo_path}/{StaticRepoFileName.ENV.value}", "w"
         ) as f:
             f.write(json.dumps(env_dict, indent=4))
-
-        new_schema_dict = self.generate_current_schema(
-            unit, repo, selected_commit
-        )
 
         with open(
             f"{tmp_git_repo_path}/{StaticRepoFileName.SCHEMA.value}", "w"
@@ -693,49 +678,60 @@ class UnitService:
         repo: Repo,
         selected_commit: str,
     ) -> dict:
-        nodes_with_links = self.unit_io_repository.get_nodes_with_links(
-            unit.uuid
-        )
-
-        output_dict = {}
-        input_dict = {}
-        for io_uuid, topic_name, topic_type, links in nodes_with_links:
-            link_topic_list = []
-            if links is not None:
-                for output_uuid, output_topic_name in links:
-                    link_topic_list.append(
-                        get_topic_name(output_uuid, output_topic_name)
-                    )
-
-            topics = [get_topic_name(io_uuid, topic_name)] + link_topic_list
-
-            if topic_type == UnitIOTypeEnum.INPUT:
-                input_dict[topic_name] = topics
-            else:
-                output_dict[topic_name] = topics
-
-        schema_dict = self.git_repo_repository.get_schema_dict(
+        manifest, dictionary = self.unit_manifest_service.read_from_commit(
             repo, selected_commit
         )
+        addresses = {}
+        for (
+            io_uuid,
+            name,
+            direction,
+            links,
+        ) in self.unit_io_repository.get_nodes_with_links(unit.uuid):
+            addresses[direction, name] = [
+                get_topic_name(io_uuid, name),
+                *(
+                    get_topic_name(link_uuid, link_name)
+                    for link_uuid, link_name in (links or ())
+                ),
+            ]
 
-        new_schema_dict = {}
-        for destination, topics in schema_dict.items():
-            new_schema_dict[destination] = {}
-
-            for topic in topics:
-                if destination in [
-                    DestinationTopicType.INPUT_BASE_TOPIC,
-                    DestinationTopicType.OUTPUT_BASE_TOPIC,
-                ]:
-                    new_schema_dict[destination][topic] = [
-                        f"{settings.pu_domain}/{destination}/{unit.uuid}/{topic}"
+        schema = {destination: {} for destination in DestinationTopicType}
+        for (
+            direction,
+            declarations,
+            reserved,
+            base_destination,
+            custom_destination,
+        ) in (
+            (
+                UnitIOTypeEnum.INPUT,
+                manifest.input,
+                dictionary.input,
+                DestinationTopicType.INPUT_BASE_TOPIC,
+                DestinationTopicType.INPUT_TOPIC,
+            ),
+            (
+                UnitIOTypeEnum.OUTPUT,
+                manifest.output,
+                dictionary.output,
+                DestinationTopicType.OUTPUT_BASE_TOPIC,
+                DestinationTopicType.OUTPUT_TOPIC,
+            ),
+        ):
+            for name in declarations:
+                if name in reserved:
+                    topic = name + GlobalPrefixTopic.BACKEND_SUB_PREFIX.value
+                    schema[base_destination][topic] = [
+                        f"{settings.pu_domain}/{base_destination.value}/{unit.uuid}/{topic}"
                     ]
-                elif destination == DestinationTopicType.INPUT_TOPIC:
-                    new_schema_dict[destination][topic] = input_dict[topic]
-                elif destination == DestinationTopicType.OUTPUT_TOPIC:
-                    new_schema_dict[destination][topic] = output_dict[topic]
-
-        return new_schema_dict
+                    continue
+                topics = addresses.get((direction, name))
+                if topics is None:
+                    msg = f"UnitIO {direction.value} {name!r} is missing for commit {selected_commit}"
+                    raise UnitIOError(msg, code=ErrorCode.UNIT_IO_NOT_FOUND)
+                schema[custom_destination][name] = topics
+        return schema
 
     def generate_token(self, uuid: uuid_pkg.UUID) -> str:
         unit = self.unit_repository.get(Unit(uuid=uuid))
@@ -781,7 +777,7 @@ class UnitService:
         1. user_env_dict - env, user write env
         2. current_env_dict - env of unit.cipher_env_dict - if exist
         3. gen_env_dict - pepeunit generating env
-        4. target_env_dict - programmer unit template from repository - schema_example.json
+        4. target_env_dict - programmer unit template from repository - env_example.json
 
         """
         target_env_dict = self.git_repo_repository.get_env_dict(

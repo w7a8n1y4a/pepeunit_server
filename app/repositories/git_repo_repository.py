@@ -463,12 +463,6 @@ class GitRepoRepository:
 
         return target_file.data_stream.read()
 
-    def get_schema_dict(self, repo: Repo, commit: str) -> dict:
-        content = self.get_file_bytes(
-            repo, commit, StaticRepoFileName.SCHEMA_EXAMPLE.value
-        )
-        return is_valid_json(content.decode(), JsonPayload.SCHEMA_EXAMPLE)
-
     def get_env_dict(self, repo: Repo, commit: str) -> dict:
         content = self.get_file_bytes(
             repo, commit, StaticRepoFileName.ENV_EXAMPLE.value

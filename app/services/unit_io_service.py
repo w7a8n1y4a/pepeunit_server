@@ -63,6 +63,7 @@ from app.schemas.pydantic.unit_io import (
 from app.schemas.pydantic.unit_manifest import UnitDefinition
 from app.services.access_service import AccessService
 from app.services.permission_service import PermissionService
+from app.services.unit_manifest_service import UnitManifestService
 from app.services.utils import (
     dict_to_yml_file,
     get_topic_name,
@@ -92,6 +93,7 @@ class UnitIOService:
         link_repository: LinkRepository = Depends(),
         permission_service: PermissionService = Depends(),
         access_service: AccessService = Depends(),
+        unit_manifest_service: UnitManifestService = Depends(),
     ) -> None:
         self.unit_repository = unit_repository
         self.repo_repository = repo_repository
@@ -102,6 +104,7 @@ class UnitIOService:
         self.link_repository = link_repository
         self.permission_service = permission_service
         self.access_service = access_service
+        self.unit_manifest_service = unit_manifest_service
 
     def get(self, uuid: uuid_pkg.UUID) -> UnitIO:
         self.access_service.authorization.check_access(
@@ -323,16 +326,10 @@ class UnitIOService:
         input_name = command_to_topic_dict[command]
         target_topic = input_name + GlobalPrefixTopic.BACKEND_SUB_PREFIX.value
         if manifest is None:
-            schema_dict = self.git_repo_repository.get_schema_dict(
+            manifest, _ = self.unit_manifest_service.read_from_commit(
                 repo, selected_commit
             )
-            declared = (
-                target_topic
-                in schema_dict[DestinationTopicType.INPUT_BASE_TOPIC]
-            )
-        else:
-            declared = input_name in manifest.input
-        if declared:
+        if input_name in manifest.input:
             update_message_dict = self._build_message_dict(
                 command,
                 repo,

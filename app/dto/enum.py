@@ -253,7 +253,6 @@ class StaticRepoFileName(str, enum.Enum):
     """
 
     UNIT_MANIFEST = "unit.yml"
-    SCHEMA_EXAMPLE = "schema_example.json"
     SCHEMA = "schema.json"
     ENV_EXAMPLE = "env_example.json"
     ENV = "env.json"
@@ -712,4 +711,3 @@ class JsonPayload(str, enum.Enum):
     PRIVATE_REPO = "Private Repo"
     ENV = "env.json"
     ENV_EXAMPLE = "env_example.json"
-    SCHEMA_EXAMPLE = "schema_example.json"

@@ -214,6 +214,7 @@ class ServiceFactory:
             data_pipe_repository=self.data_pipe_repository,
             permission_service=self.permission_service,
             access_service=self.access_service,
+            unit_manifest_service=self.get_unit_manifest_service(),
         )
 
     def get_grafana_service(self) -> GrafanaService:

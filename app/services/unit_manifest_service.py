@@ -3,9 +3,14 @@ from pydantic import ValidationError
 
 from app.configs.error_codes import ErrorCode
 from app.configs.errors import GitRepoError
-from app.dto.enum import AgentType
+from app.domain.repo_model import Repo
+from app.dto.enum import AgentType, StaticRepoFileName
+from app.repositories.git_repo_repository import GitRepoRepository
 from app.repositories.unit_manifest_repository import UnitManifestRepository
-from app.schemas.pydantic.unit_manifest import UnitDefinition
+from app.schemas.pydantic.unit_manifest import (
+    ManifestDictionary,
+    UnitDefinition,
+)
 from app.schemas.pydantic.unit_manifest_validation import (
     UnitManifestValidationErrorRead,
 )
@@ -24,8 +29,24 @@ class UnitManifestService:
     ) -> None:
         self.unit_manifest_repository = unit_manifest_repository
         self.access_service = access_service
+        self.git_repo_repository = GitRepoRepository()
 
-    def parse(self, content: str | bytes) -> UnitDefinition:
+    def read_from_commit(
+        self, repo: Repo, selected_commit: str
+    ) -> tuple[UnitDefinition, ManifestDictionary]:
+        content = self.git_repo_repository.get_file_bytes(
+            repo, selected_commit, StaticRepoFileName.UNIT_MANIFEST.value
+        )
+        try:
+            return self.parse(content)
+        except ValidationError as error:
+            raise GitRepoError(
+                str(error), code=ErrorCode.GIT_REPO_UNIT_MANIFEST_INVALID
+            ) from error
+
+    def parse(
+        self, content: str | bytes
+    ) -> tuple[UnitDefinition, ManifestDictionary]:
         source = (
             content.encode("utf-8") if isinstance(content, str) else content
         )
@@ -40,7 +61,7 @@ class UnitManifestService:
         unit.validate_search(dictionary)
         unit.resolve_fields(dictionary)
         unit.validate_fields(dictionary)
-        return unit
+        return unit, dictionary
 
     def validate(
         self, content: bytes
@@ -76,7 +97,7 @@ class UnitManifestService:
     def readme(self, content: bytes) -> str:
         self.access_service.authorization.check_access([AgentType.USER])
         try:
-            unit = self.parse(content)
+            unit, _ = self.parse(content)
         except ValidationError as error:
             raise GitRepoError(
                 str(error), code=ErrorCode.GIT_REPO_UNIT_MANIFEST_INVALID

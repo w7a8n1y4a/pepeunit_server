@@ -4,12 +4,12 @@ import uuid as uuid_pkg
 
 from fastapi import APIRouter, Depends, status
 from starlette.background import BackgroundTask
-from starlette.responses import FileResponse
+from starlette.responses import FileResponse, PlainTextResponse
 
 from app.configs.clickhouse import get_hand_clickhouse_client
 from app.configs.db import get_hand_session
 from app.configs.rest import get_unit_service
-from app.dto.enum import BackendTopicCommand
+from app.dto.enum import AgentType, BackendTopicCommand
 from app.schemas.pydantic.shared import MqttRead
 from app.schemas.pydantic.unit import (
     EnvJsonString,
@@ -25,6 +25,7 @@ from app.schemas.pydantic.unit import (
     UnitsResult,
     UnitUpdate,
 )
+from app.services.unit_env_serializer import UnitEnvSerializer
 from app.services.unit_service import UnitService
 
 router = APIRouter()
@@ -48,11 +49,20 @@ def get(
     return UnitRead(**unit_service.get(uuid).to_dict())
 
 
-@router.get("/env/{uuid}", response_model=dict)
+@router.get(
+    "/env/{uuid}",
+    response_model=dict,
+    responses={
+        200: {"content": {"text/plain": {"schema": {"type": "string"}}}}
+    },
+)
 def get_env(
     uuid: uuid_pkg.UUID, unit_service: UnitService = Depends(get_unit_service)
-):
-    return unit_service.get_env(uuid)
+) -> dict | PlainTextResponse:
+    env = unit_service.get_env(uuid)
+    if unit_service.access_service.current_agent.type == AgentType.UNIT:
+        return PlainTextResponse(UnitEnvSerializer.serialize(env))
+    return env
 
 
 @router.get(

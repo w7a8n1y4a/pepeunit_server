@@ -254,7 +254,7 @@ class StaticRepoFileName(str, enum.Enum):
 
     UNIT_MANIFEST = "unit.yml"
     SCHEMA = "schema.json"
-    ENV = "env.json"
+    ENV = ".env"
 
 
 class ReservedStateKey(str, enum.Enum):

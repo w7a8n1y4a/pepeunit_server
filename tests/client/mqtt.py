@@ -55,7 +55,7 @@ class MQTTClient:
         self._thread: threading.Thread | None = None
         self._connected_since: float | None = None
 
-        self.env_file = f"tmp/test_units/{unit.uuid}/env.json"
+        self.env_file = f"tmp/test_units/{unit.uuid}/.env"
         self.schema_file = f"tmp/test_units/{unit.uuid}/schema.json"
         self.log_file = f"tmp/test_units/{unit.uuid}/log.json"
 

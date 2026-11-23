@@ -7,6 +7,7 @@ import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from pepeunit_client.file_manager import FileManager
 
 from app import runtime, settings
 from app.configs.clickhouse import get_clickhouse_client
@@ -403,17 +404,16 @@ def test_env_update_command(
 
     assert post_unit_command(token, chain_sink_unit, BackendTopicCommand.ENV_UPDATE) < 400
 
-    filepath = f"tmp/test_units/{chain_sink_unit.uuid}/env.json"
+    filepath = f"tmp/test_units/{chain_sink_unit.uuid}/.env"
 
     def env_updated() -> bool:
-        with open(filepath) as handle:
-            return json.loads(handle.read())["PU_MIN_LOG_LEVEL"] == "Info"
+        return FileManager.read_env(filepath)["PU_MIN_LOG_LEVEL"] == "Info"
 
     wait_until(
         env_updated,
         timeout=30,
         interval=2,
-        message="env.json was not updated on unit",
+        message=".env was not updated on unit",
     )
 
 

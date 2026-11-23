@@ -76,6 +76,7 @@ from app.services.background import BackgroundService
 from app.services.icon_image import IconImage
 from app.services.operation_task_service import OperationTaskService
 from app.services.permission_service import PermissionService
+from app.services.unit_env_serializer import UnitEnvSerializer
 from app.services.unit_io_service import UnitIOService
 from app.services.unit_manifest_service import UnitManifestService
 from app.services.utils import get_topic_name
@@ -125,7 +126,7 @@ class UnitService:
             creator_uuid=self.access_service.current_agent.uuid,
             **data.model_dump(exclude={"is_compilable_unit"}),
         )
-        _, _, manifest = self.select_unit_manifest(repo, unit)
+        _, _, manifest, _ = self.select_unit_manifest(repo, unit)
 
         try:
             unit.create_datetime = datetime.datetime.now(datetime.UTC)
@@ -147,13 +148,13 @@ class UnitService:
 
     def select_unit_manifest(
         self, repo: Repo, unit: Unit
-    ) -> tuple[str, str | None, UnitDefinition]:
+    ) -> tuple[str, str | None, UnitDefinition, ManifestDictionary]:
         unit.is_compilable_unit = False
         self.is_valid_update_rule(unit)
         selected_commit, selected_tag = (
             self.git_repo_repository.get_selected_commit_and_tag(repo, unit)
         )
-        manifest, _ = self.unit_manifest_service.read_from_commit(
+        manifest, dictionary = self.unit_manifest_service.read_from_commit(
             repo, selected_commit
         )
         if unit.is_auto_update_unit:
@@ -169,7 +170,7 @@ class UnitService:
             unit.target_firmware_platform,
             (selected_commit, selected_tag),
         )
-        return selected_commit, selected_tag, manifest
+        return selected_commit, selected_tag, manifest, dictionary
 
     def get(self, uuid: uuid_pkg.UUID) -> Unit:
         self.access_service.authorization.check_access(
@@ -208,12 +209,14 @@ class UnitService:
     ) -> Unit:
         repo = self.repo_repository.get(Repo(uuid=unit.repo_uuid))
         is_valid_object(repo, NotFoundEntity.REPO)
-        selected_commit, selected_tag, manifest = self.select_unit_manifest(
-            repo, unit
+        selected_commit, selected_tag, manifest, dictionary = (
+            self.select_unit_manifest(repo, unit)
         )
         if unit.cipher_env_dict:
-            env = self.generate_unified_env(unit, manifest, selected_commit)
-            self.save_validated_env(unit, manifest, env)
+            env = self.generate_unified_env(
+                unit, manifest, dictionary, selected_commit
+            )
+            self.save_validated_env(unit, manifest, dictionary, env)
 
         uuid = unit.uuid
         result = self.unit_io_service.synchronize(unit, manifest)
@@ -250,12 +253,14 @@ class UnitService:
             self.git_repo_repository.get_selected_commit_and_tag(repo, unit)
         )
 
-        manifest, _ = self.unit_manifest_service.read_from_commit(
+        manifest, dictionary = self.unit_manifest_service.read_from_commit(
             repo, selected_commit
         )
-        env = self.generate_unified_env(unit, manifest, selected_commit)
+        env = self.generate_unified_env(
+            unit, manifest, dictionary, selected_commit
+        )
         if self.access_service.current_agent.type == AgentType.UNIT:
-            self.validate_env(manifest, env)
+            self.validate_env(manifest, dictionary, env)
         return env
 
     def set_env(self, uuid: uuid_pkg.UUID, env_json_str: str) -> None:
@@ -275,17 +280,16 @@ class UnitService:
             self.git_repo_repository.get_selected_commit_and_tag(repo, unit)
         )
 
-        manifest, _ = self.unit_manifest_service.read_from_commit(
+        manifest, dictionary = self.unit_manifest_service.read_from_commit(
             repo, selected_commit
         )
         submitted = self.require_env_object(
             is_valid_json(env_json_str, JsonPayload.ENV)
         )
         env = self.generate_unified_env(
-            unit, manifest, selected_commit, submitted
+            unit, manifest, dictionary, selected_commit, submitted
         )
-        env.pop(ReservedEnvVariableName.PU_COMMIT_VERSION.value)
-        self.save_validated_env(unit, manifest, env)
+        self.save_validated_env(unit, manifest, dictionary, env)
         unit.last_update_datetime = datetime.datetime.now(datetime.UTC)
         self.unit_repository.update(unit.uuid, unit)
 
@@ -369,8 +373,10 @@ class UnitService:
         manifest, dictionary = self.unit_manifest_service.read_from_commit(
             repo, selected_commit
         )
-        env_dict = self.generate_unified_env(unit, manifest, selected_commit)
-        self.validate_env(manifest, env_dict)
+        env_dict = self.generate_unified_env(
+            unit, manifest, dictionary, selected_commit
+        )
+        self.validate_env(manifest, dictionary, env_dict)
 
         new_schema_dict = self.generate_current_schema(
             unit, selected_commit, manifest, dictionary
@@ -387,9 +393,12 @@ class UnitService:
             )
 
         with open(
-            f"{tmp_git_repo_path}/{StaticRepoFileName.ENV.value}", "w"
+            f"{tmp_git_repo_path}/{StaticRepoFileName.ENV.value}",
+            "w",
+            encoding="utf-8",
+            newline="\n",
         ) as f:
-            f.write(json.dumps(env_dict, indent=4))
+            f.write(UnitEnvSerializer.serialize(env_dict))
 
         with open(
             f"{tmp_git_repo_path}/{StaticRepoFileName.SCHEMA.value}", "w"
@@ -736,7 +745,10 @@ class UnitService:
 
         return AgentUnit(**unit.dict()).generate_agent_token()
 
-    def gen_env_dict(self, uuid: uuid_pkg.UUID) -> dict:
+    def runtime_env(
+        self, uuid: uuid_pkg.UUID, selected_commit: str
+    ) -> dict[str, JsonValue]:
+        instance = runtime.get()
         return {
             ReservedEnvVariableName.PU_DOMAIN: settings.pu_domain,
             ReservedEnvVariableName.PU_HTTP_TYPE: settings.pu_http_type,
@@ -745,35 +757,25 @@ class UnitService:
             ReservedEnvVariableName.PU_MQTT_HOST: settings.pu_mqtt_host,
             ReservedEnvVariableName.PU_MQTT_PORT: settings.pu_mqtt_port,
             ReservedEnvVariableName.PU_AUTH_TOKEN: self.generate_token(uuid),
-            ReservedEnvVariableName.PU_SECRET_KEY: base64.b64encode(
-                os.urandom(32)
-            ).decode("utf-8"),
-            ReservedEnvVariableName.PU_ENCRYPT_KEY: base64.b64encode(
-                os.urandom(32)
-            ).decode("utf-8"),
-            ReservedEnvVariableName.PU_MQTT_PING_INTERVAL: 20,
-            ReservedEnvVariableName.PU_MQTT_KEEPALIVE: runtime.get().pu_mqtt_keepalive,
-            ReservedEnvVariableName.PU_STATE_SEND_INTERVAL: (
-                runtime.get().pu_instance_unit_state_send_interval
-            ),
-            ReservedEnvVariableName.PU_MIN_LOG_LEVEL: LogLevel.DEBUG.value,
-            ReservedEnvVariableName.PU_MAX_LOG_LENGTH: 64,
+            ReservedEnvVariableName.PU_MQTT_KEEPALIVE: instance.pu_mqtt_keepalive,
+            ReservedEnvVariableName.PU_STATE_SEND_INTERVAL: instance.pu_instance_unit_state_send_interval,
+            ReservedEnvVariableName.PU_COMMIT_VERSION: selected_commit,
         }
 
     def generate_unified_env(
         self,
         unit: Unit,
         manifest: UnitDefinition,
+        dictionary: ManifestDictionary,
         selected_commit: str,
         user_env_dict: dict[str, JsonValue] | None = None,
     ) -> dict[str, JsonValue]:
+        fields = manifest.env | dictionary.env
         defaults = {
             name: field[FieldKey.DEFAULT]
-            for name, field in manifest.env.items()
+            for name, field in fields.items()
             if FieldKey.DEFAULT in field
-            and name not in ReservedEnvVariableName
         }
-        generated = self.gen_env_dict(unit.uuid)
         saved = {}
         if unit.cipher_env_dict:
             saved = self.require_env_object(
@@ -782,13 +784,15 @@ class UnitService:
                     JsonPayload.CIPHER_ENV,
                 )
             )
-        values = defaults | generated | saved | (user_env_dict or {})
-        allowed = generated.keys() | manifest.env.keys()
-        env = {
-            name: value for name, value in values.items() if name in allowed
-        }
-        env[ReservedEnvVariableName.PU_COMMIT_VERSION.value] = selected_commit
-        return env
+        values = defaults | saved | (user_env_dict or {})
+        for name in (
+            ReservedEnvVariableName.PU_SECRET_KEY,
+            ReservedEnvVariableName.PU_ENCRYPT_KEY,
+        ):
+            if name not in values:
+                values[name] = base64.b64encode(os.urandom(32)).decode("ascii")
+        values.update(self.runtime_env(unit.uuid, selected_commit))
+        return {name: values[name] for name in fields if name in values}
 
     @staticmethod
     def require_env_object(env: JsonValue) -> dict[str, JsonValue]:
@@ -799,43 +803,57 @@ class UnitService:
 
     @staticmethod
     def validate_env(
-        manifest: UnitDefinition, env: dict[str, JsonValue]
+        manifest: UnitDefinition,
+        dictionary: ManifestDictionary,
+        env: dict[str, JsonValue],
     ) -> None:
-        fields = {
-            name: field
-            for name, field in manifest.env.items()
-            if name not in ReservedEnvVariableName
-        }
+        fields = manifest.env | dictionary.env
         missing = [
             name
             for name, field in fields.items()
-            if name not in env and not field[FieldKey.OPTIONAL]
+            if name not in env
+            and not field.get(
+                FieldKey.OPTIONAL, dictionary.defaults[FieldKey.OPTIONAL]
+            )
         ]
         if missing:
             msg = f"Required Unit settings are missing: {', '.join(missing)}"
             raise UnitError(msg, code=ErrorCode.GIT_REPO_ENV_UNRESOLVED)
         try:
             for name, field in fields.items():
-                if name in env:
-                    manifest.validate_literal(
-                        field, env[name], (FieldKey.ENV, name)
-                    )
-            json.dumps(env, allow_nan=False)
+                if name not in env:
+                    continue
+                declaration = field
+                if name in dictionary.env:
+                    declaration = copy.deepcopy(field)
+                    manifest.apply_field_defaults(declaration, dictionary)
+                manifest.validate_literal(
+                    declaration, env[name], (FieldKey.ENV, name)
+                )
+            json.dumps(env, allow_nan=False, ensure_ascii=False).encode(
+                "utf-8"
+            )
         except ValidationError as error:
             raise UnitError(
                 str(error), code=ErrorCode.GIT_REPO_ENV_JSON_INVALID
             ) from error
         except ValueError as error:
-            msg = "Unit settings must contain finite JSON values"
+            msg = "Unit settings must contain finite UTF-8 JSON values"
             raise UnitError(
                 msg, code=ErrorCode.GIT_REPO_ENV_JSON_INVALID
             ) from error
 
     def save_validated_env(
-        self, unit: Unit, manifest: UnitDefinition, env: dict[str, JsonValue]
+        self,
+        unit: Unit,
+        manifest: UnitDefinition,
+        dictionary: ManifestDictionary,
+        env: dict[str, JsonValue],
     ) -> None:
-        self.validate_env(manifest, env)
-        unit.cipher_env_dict = aes_gcm_encode(json.dumps(env))
+        self.validate_env(manifest, dictionary, env)
+        stored = dict(env)
+        stored.pop(ReservedEnvVariableName.PU_COMMIT_VERSION.value, None)
+        unit.cipher_env_dict = aes_gcm_encode(json.dumps(stored))
 
     @staticmethod
     def is_valid_update_rule(data: Unit | UnitCreate) -> None:

@@ -1,4 +1,5 @@
 import json
+import re
 import uuid as uuid_pkg
 from collections.abc import Collection
 from copy import deepcopy
@@ -169,6 +170,13 @@ class UnitDefinition(ManifestContractHeader):
     def validate_fields(self, dictionary: ManifestDictionary) -> None:
         for section in (FieldKey.ENV, FieldKey.INPUT, FieldKey.OUTPUT):
             for name, declaration in getattr(self, section).items():
+                if section == FieldKey.ENV:
+                    self.require_field(
+                        re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
+                        is not None,
+                        (section, name),
+                        "Environment variable name is invalid",
+                    )
                 self.validate_field(declaration, dictionary, (section, name))
 
     def validate_field(

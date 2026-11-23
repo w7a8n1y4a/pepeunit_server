@@ -4,9 +4,16 @@ from collections.abc import Collection
 from copy import deepcopy
 from math import isfinite
 from re import Pattern
-from typing import NotRequired, TypedDict
+from typing import NotRequired, Self, TypedDict
 
-from pydantic import BaseModel, Field, JsonValue, ValidationError
+from pydantic import (
+    BaseModel,
+    Field,
+    FiniteFloat,
+    JsonValue,
+    ValidationError,
+    model_validator,
+)
 from pydantic_core import InitErrorDetails
 
 from app.dto.enum import (
@@ -252,7 +259,7 @@ class UnitDefinition(ManifestContractHeader):
             self.require_field(
                 False, (*path, FieldKey.MAX_LENGTH), "max_length is env-only"
             )
-        self.validate_limits(field, path)
+        self.validate_limits(field, dictionary, path)
         if FieldKey.UNIT in field:
             self.require_field(
                 bool(field[FieldKey.UNIT].strip()),
@@ -379,7 +386,10 @@ class UnitDefinition(ManifestContractHeader):
             self.validate_literal(field, value, (*path, key))
 
     def validate_limits(
-        self, field: FieldDeclaration, path: tuple[str | int, ...]
+        self,
+        field: FieldDeclaration,
+        dictionary: ManifestDictionary,
+        path: tuple[str | int, ...],
     ) -> None:
         for key in (FieldKey.MIN, FieldKey.MAX):
             if key not in field:
@@ -415,6 +425,30 @@ class UnitDefinition(ManifestContractHeader):
                     (*path, upper),
                     "Upper limit must not be less than lower limit",
                 )
+
+        if path[0] in (FieldKey.INPUT, FieldKey.OUTPUT):
+            self.apply_io_type_limits(field, dictionary.type_limits, path)
+
+    def apply_io_type_limits(
+        self,
+        field: FieldDeclaration,
+        type_limits: ManifestTypeLimits,
+        path: tuple[str | int, ...],
+    ) -> None:
+        kind = field[FieldKey.TYPE]
+        if kind not in (FieldType.INT, FieldType.FLOAT):
+            return
+        limits = getattr(type_limits, kind)
+        for key, default in (
+            (FieldKey.MIN, limits.min),
+            (FieldKey.MAX, limits.max),
+        ):
+            bound = field.setdefault(key, default)
+            self.require_field(
+                limits.min <= bound <= limits.max,
+                (*path, key),
+                f"Numeric limit is outside the {kind} bounds",
+            )
 
     def validate_transport(
         self,
@@ -667,8 +701,26 @@ class ManifestNamePatterns(BaseModel):
     env: Pattern[str]
 
 
+class NumericTypeLimits[T: (int, float)](BaseModel):
+    min: T
+    max: T
+
+    @model_validator(mode="after")
+    def validate_order(self) -> Self:
+        if self.min > self.max:
+            msg = "Upper limit must not be less than lower limit"
+            raise ValueError(msg)
+        return self
+
+
+class ManifestTypeLimits(BaseModel):
+    int: NumericTypeLimits[int]
+    float: NumericTypeLimits[FiniteFloat]
+
+
 class ManifestDictionary(ManifestContractHeader):
     name_patterns: ManifestNamePatterns
+    type_limits: ManifestTypeLimits
     unit_types: list[str]
     execution_types: list[str]
     types: list[str]

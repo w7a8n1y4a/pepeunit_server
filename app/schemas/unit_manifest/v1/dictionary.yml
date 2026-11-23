@@ -11,6 +11,14 @@ name_patterns:
   io: '[A-Za-z0-9_.-]+'
   env: '[A-Za-z_][A-Za-z0-9_]*'
 
+type_limits:
+  int:
+    min: -9223372036854775808
+    max: 9223372036854775807
+  float:
+    min: -1.7976931348623157e+308
+    max: 1.7976931348623157e+308
+
 units_of_measurement:
   standard: UCUM
   version: '2.2'

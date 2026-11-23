@@ -2,7 +2,12 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from fractions import Fraction
 
-from app.dto.enum import FieldKey, FieldType, UnitIOCompatibilityIssue
+from app.dto.enum import (
+    FieldKey,
+    FieldType,
+    OutputRouting,
+    UnitIOCompatibilityIssue,
+)
 from app.schemas.pydantic.unit_manifest import (
     FieldDeclaration,
     FieldDeclarations,
@@ -44,6 +49,36 @@ class UnitIOCompatibility:
 
     def __init__(self) -> None:
         self.units: UCUMUnits | None = None
+
+    def check_link(
+        self, output: FieldDeclaration, input_field: FieldDeclaration
+    ) -> UnitIOCompatibilityResult:
+        if output.get(FieldKey.ROUTING) != OutputRouting.SELECTED_LINK:
+            return self.check(output, input_field)
+        if FieldKey.VARIANTS in output:
+            return self.combine(
+                self.check_routed_data(
+                    fields, input_field, (FieldKey.VARIANTS.value, name)
+                )
+                for name, fields in output[FieldKey.VARIANTS].items()
+            )
+        return self.check_routed_data(
+            output.get(FieldKey.FIELDS, {}), input_field, ()
+        )
+
+    def check_routed_data(
+        self,
+        fields: FieldDeclarations,
+        input_field: FieldDeclaration,
+        path: tuple[str, ...],
+    ) -> UnitIOCompatibilityResult:
+        data = fields.get(FieldKey.DATA)
+        data_path = (*path, FieldKey.DATA.value)
+        if data is None or data.get(FieldKey.OPTIONAL, False):
+            return UnitIOCompatibilityResult(
+                UnitIOCompatibilityIssue.REQUIRED_FIELD, data_path
+            )
+        return self.check(data, input_field, data_path)
 
     def check(
         self,

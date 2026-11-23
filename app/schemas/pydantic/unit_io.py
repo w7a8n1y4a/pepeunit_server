@@ -16,6 +16,7 @@ from app.dto.enum import (
     MqttQos,
     OrderByDate,
     ProcessingPolicyType,
+    UnitIOCompatibilityIssue,
     UnitIOTypeEnum,
     VisibilityLevel,
 )
@@ -70,6 +71,13 @@ class LinkRead(BaseModel):
     uuid: uuid_pkg.UUID
     output_uuid: uuid_pkg.UUID
     input_uuid: uuid_pkg.UUID
+
+
+class LinkCompatibilityRead(BaseModel):
+    compatible: bool
+    depends_on_value: bool
+    issue: UnitIOCompatibilityIssue | None
+    path: tuple[str, ...]
 
 
 class LinkCreate(BaseModel):

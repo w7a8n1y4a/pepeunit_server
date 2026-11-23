@@ -170,6 +170,7 @@ class ErrorCode(IntEnum):
     # Link, domain 509. Band 509–530.
     LINK_NOT_FOUND = 509_100
     LINK_EXISTS = 509_101
+    LINK_INCOMPATIBLE = 509_102
     # MQTT, domain 531. Band 531–564.
     MQTT_RATE_LIMIT = 531_100
     MQTT_PAYLOAD_TOO_LARGE = 531_101

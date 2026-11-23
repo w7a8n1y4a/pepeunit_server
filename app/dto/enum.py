@@ -213,6 +213,7 @@ class FieldKey(str, enum.Enum):
     FORMAT = "format"
     ENUM = "enum"
     ACTION = "action"
+    DATA = "data"
     DEFAULT = "default"
     EXAMPLE = "example"
     SECRET = "secret"

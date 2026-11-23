@@ -29,6 +29,7 @@ from app.dto.enum import (
     AgentType,
     BackendTopicCommand,
     DestinationTopicType,
+    FieldKey,
     GlobalPrefixTopic,
     JsonPayload,
     NotFoundEntity,
@@ -56,14 +57,22 @@ from app.schemas.mqtt.utils import publish_to_topic
 from app.schemas.pydantic.unit_io import (
     DataPipeFilter,
     DataPipeValidationErrorRead,
+    LinkCompatibilityRead,
     LinkCreate,
     UnitIOFilter,
     UnitIOSetState,
     UnitIOUpdate,
 )
-from app.schemas.pydantic.unit_manifest import UnitDefinition
+from app.schemas.pydantic.unit_manifest import (
+    FieldDeclaration,
+    UnitDefinition,
+)
 from app.services.access_service import AccessService
 from app.services.permission_service import PermissionService
+from app.services.unit_io_compatibility import (
+    UnitIOCompatibility,
+    UnitIOCompatibilityResult,
+)
 from app.services.unit_manifest_service import UnitManifestService
 from app.services.utils import (
     dict_to_yml_file,
@@ -394,27 +403,82 @@ class UnitIOService:
 
         return message_dict
 
-    def create_link(self, data: LinkCreate) -> Link:
-        data.input_uuid = is_valid_uuid(
-            data.input_uuid, UuidEntity.UNIT_IO_INPUT
-        )
-        data.output_uuid = is_valid_uuid(
+    def get_link_nodes(self, data: LinkCreate) -> tuple[UnitIO, UnitIO]:
+        self.access_service.authorization.check_access([AgentType.USER])
+        output_uuid = is_valid_uuid(
             data.output_uuid, UuidEntity.UNIT_IO_OUTPUT
         )
+        input_uuid = is_valid_uuid(data.input_uuid, UuidEntity.UNIT_IO_INPUT)
 
-        self.access_service.authorization.check_access([AgentType.USER])
-
-        output_node = self.unit_io_repository.get(
-            UnitIO(uuid=data.output_uuid)
-        )
+        output_node = self.unit_io_repository.get(UnitIO(uuid=output_uuid))
         is_valid_object(output_node, NotFoundEntity.UNIT_IO)
         self.is_valid_output_unit_io(output_node)
         self.access_service.authorization.check_visibility(output_node)
 
-        input_node = self.unit_io_repository.get(UnitIO(uuid=data.input_uuid))
+        input_node = self.unit_io_repository.get(UnitIO(uuid=input_uuid))
         is_valid_object(input_node, NotFoundEntity.UNIT_IO)
         self.is_valid_input_unit_io(input_node)
         self.access_service.authorization.check_visibility(input_node)
+        return output_node, input_node
+
+    def read_link_manifest(
+        self, unit_uuid: uuid_pkg.UUID
+    ) -> tuple[str, UnitDefinition]:
+        unit = self.unit_repository.get(Unit(uuid=unit_uuid))
+        is_valid_object(unit, NotFoundEntity.UNIT)
+        repo = self.repo_repository.get(Repo(uuid=unit.repo_uuid))
+        is_valid_object(repo, NotFoundEntity.REPO)
+        selected_commit, _ = (
+            self.git_repo_repository.get_selected_commit_and_tag(repo, unit)
+        )
+        manifest, _ = self.unit_manifest_service.read_from_commit(
+            repo, selected_commit
+        )
+        return selected_commit, manifest
+
+    @staticmethod
+    def get_link_field(
+        node: UnitIO,
+        section: FieldKey,
+        selected_commit: str,
+        manifest: UnitDefinition,
+    ) -> FieldDeclaration:
+        field = getattr(manifest, section).get(node.topic_name)
+        if field is None:
+            msg = f"UnitIO {node.type} {node.topic_name!r} is missing for commit {selected_commit}"
+            raise UnitIOError(msg, code=ErrorCode.UNIT_IO_NOT_FOUND)
+        return field
+
+    def compare_link_schemas(
+        self, output_node: UnitIO, input_node: UnitIO
+    ) -> UnitIOCompatibilityResult:
+        manifests = {
+            unit_uuid: self.read_link_manifest(unit_uuid)
+            for unit_uuid in dict.fromkeys(
+                (output_node.unit_uuid, input_node.unit_uuid)
+            )
+        }
+        output = self.get_link_field(
+            output_node, FieldKey.OUTPUT, *manifests[output_node.unit_uuid]
+        )
+        input_field = self.get_link_field(
+            input_node, FieldKey.INPUT, *manifests[input_node.unit_uuid]
+        )
+        return UnitIOCompatibility().check_link(output, input_field)
+
+    def check_link_compatibility(
+        self, data: LinkCreate
+    ) -> LinkCompatibilityRead:
+        result = self.compare_link_schemas(*self.get_link_nodes(data))
+        return LinkCompatibilityRead(
+            compatible=result.compatible,
+            depends_on_value=result.depends_on_value,
+            issue=result.issue,
+            path=result.path,
+        )
+
+    def create_link(self, data: LinkCreate) -> Link:
+        output_node, input_node = self.get_link_nodes(data)
 
         # Check connection limit for input node (incoming connections)
         current_input_connections = self.link_repository.count_by_input_node(
@@ -436,12 +500,21 @@ class UnitIOService:
                 msg, code=ErrorCode.UNIT_IO_OUTPUT_CONNECTION_LIMIT
             )
 
-        new_link = Link(**data.dict())
-        new_link.creator_uuid = self.access_service.current_agent.uuid
+        new_link = Link(
+            output_uuid=output_node.uuid,
+            input_uuid=input_node.uuid,
+            creator_uuid=self.access_service.current_agent.uuid,
+        )
 
         if self.link_repository.check(new_link):
             msg = "Link exist"
             raise UnitIOError(msg, code=ErrorCode.LINK_EXISTS)
+
+        compatibility = self.compare_link_schemas(output_node, input_node)
+        if compatibility.issue is not None:
+            path = ".".join(compatibility.path) or "$"
+            msg = f"Output and Input are incompatible at {path} ({compatibility.issue.value})"
+            raise UnitIOError(msg, code=ErrorCode.LINK_INCOMPATIBLE)
 
         with contextlib.suppress(CustomPermissionError):
             self.permission_service.create_by_domains(

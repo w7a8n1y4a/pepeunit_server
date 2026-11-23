@@ -10,6 +10,7 @@ from app.schemas.pydantic.shared import UnitIORead, UnitIOsResult
 from app.schemas.pydantic.unit_io import (
     DataPipeFilter,
     DataPipeValidationErrorRead,
+    LinkCompatibilityRead,
     LinkCreate,
     LinkRead,
     PipeDataResult,
@@ -131,6 +132,14 @@ def get_unit_ios(
         count=count,
         unit_ios=[UnitIORead(**unit_io.dict()) for unit_io in unit_ios],
     )
+
+
+@router.post("/check_link_compatibility", response_model=LinkCompatibilityRead)
+def check_link_compatibility(
+    data: LinkCreate,
+    unit_io_service: UnitIOService = Depends(get_unit_io_service),
+) -> LinkCompatibilityRead:
+    return unit_io_service.check_link_compatibility(data)
 
 
 @router.post(

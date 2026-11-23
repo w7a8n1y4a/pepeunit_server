@@ -17,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from app import runtime, settings
 from app.configs.error_codes import ErrorCode
 from app.configs.errors import (
+    GitRepoError,
     MqttError,
     NoAccessError,
     UnitError,
@@ -61,6 +62,7 @@ from app.schemas.pydantic.shared import UnitIORead
 from app.schemas.pydantic.unit import (
     SelectedVersionRead,
     UnitCreate,
+    UnitEnvSizeRead,
     UnitFilter,
     UnitLogFilter,
     UnitRead,
@@ -68,6 +70,7 @@ from app.schemas.pydantic.unit import (
 )
 from app.schemas.pydantic.unit_io import UnitIOFilter
 from app.schemas.pydantic.unit_manifest import (
+    FieldDeclarations,
     ManifestDictionary,
     UnitDefinition,
 )
@@ -77,6 +80,7 @@ from app.services.icon_image import IconImage
 from app.services.operation_task_service import OperationTaskService
 from app.services.permission_service import PermissionService
 from app.services.unit_env_serializer import UnitEnvSerializer
+from app.services.unit_env_size import UnitEnvSize
 from app.services.unit_io_service import UnitIOService
 from app.services.unit_manifest_service import UnitManifestService
 from app.services.utils import get_topic_name
@@ -234,7 +238,48 @@ class UnitService:
                 raise
         return result
 
-    def get_env(self, uuid: uuid_pkg.UUID) -> dict:
+    def get_env(self, uuid: uuid_pkg.UUID) -> dict[str, JsonValue]:
+        unit, selected_commit, manifest, dictionary = self.read_env_manifest(
+            uuid
+        )
+        env = self.generate_unified_env(
+            unit, manifest, dictionary, selected_commit
+        )
+        if self.access_service.current_agent.type == AgentType.UNIT:
+            self.validate_env(manifest, dictionary, env)
+        return env
+
+    def get_env_max_size(self, uuid: uuid_pkg.UUID) -> UnitEnvSizeRead:
+        unit, selected_commit, manifest, dictionary = self.read_env_manifest(
+            uuid
+        )
+        fields = self.env_fields(manifest, dictionary)
+        runtime_values = self.runtime_env(unit.uuid, selected_commit)
+        fixed = {
+            name: runtime_values[name]
+            for name in fields
+            if name in runtime_values
+        }
+        self.validate_env_values(manifest, fields, fixed)
+
+        max_chars = len(UnitEnvSerializer.serialize(fixed))
+        editable = {
+            name: field for name, field in fields.items() if name not in fixed
+        }
+        for name, size in UnitEnvSize.calculate(editable).items():
+            if size is None:
+                if editable[name][FieldKey.OPTIONAL]:
+                    continue
+                msg = f"Required environment variable env.{name} has no valid value"
+                raise GitRepoError(
+                    msg, code=ErrorCode.GIT_REPO_UNIT_MANIFEST_INVALID
+                )
+            max_chars += len(UnitEnvSerializer.format_line(name, "")) + size
+        return UnitEnvSizeRead(max_chars=max_chars)
+
+    def read_env_manifest(
+        self, uuid: uuid_pkg.UUID
+    ) -> tuple[Unit, str, UnitDefinition, ManifestDictionary]:
         self.access_service.authorization.check_access(
             [AgentType.USER, AgentType.UNIT]
         )
@@ -256,12 +301,7 @@ class UnitService:
         manifest, dictionary = self.unit_manifest_service.read_from_commit(
             repo, selected_commit
         )
-        env = self.generate_unified_env(
-            unit, manifest, dictionary, selected_commit
-        )
-        if self.access_service.current_agent.type == AgentType.UNIT:
-            self.validate_env(manifest, dictionary, env)
-        return env
+        return unit, selected_commit, manifest, dictionary
 
     def set_env(self, uuid: uuid_pkg.UUID, env_json_str: str) -> None:
         self.access_service.authorization.check_access([AgentType.USER])
@@ -799,12 +839,22 @@ class UnitService:
         return env
 
     @staticmethod
+    def env_fields(
+        manifest: UnitDefinition, dictionary: ManifestDictionary
+    ) -> FieldDeclarations:
+        standard_fields = copy.deepcopy(dictionary.env)
+        for field in standard_fields.values():
+            manifest.apply_field_defaults(field, dictionary)
+        return manifest.env | standard_fields
+
+    @classmethod
     def validate_env(
+        cls,
         manifest: UnitDefinition,
         dictionary: ManifestDictionary,
         env: dict[str, JsonValue],
     ) -> None:
-        fields = manifest.env | dictionary.env
+        fields = cls.env_fields(manifest, dictionary)
         missing = [
             name
             for name, field in fields.items()
@@ -816,17 +866,20 @@ class UnitService:
         if missing:
             msg = f"Required Unit settings are missing: {', '.join(missing)}"
             raise UnitError(msg, code=ErrorCode.GIT_REPO_ENV_UNRESOLVED)
+        cls.validate_env_values(manifest, fields, env)
+
+    @staticmethod
+    def validate_env_values(
+        manifest: UnitDefinition,
+        fields: FieldDeclarations,
+        env: dict[str, JsonValue],
+    ) -> None:
         try:
             for name, field in fields.items():
-                if name not in env:
-                    continue
-                declaration = field
-                if name in dictionary.env:
-                    declaration = copy.deepcopy(field)
-                    manifest.apply_field_defaults(declaration, dictionary)
-                manifest.validate_literal(
-                    declaration, env[name], (FieldKey.ENV, name)
-                )
+                if name in env:
+                    manifest.validate_literal(
+                        field, env[name], (FieldKey.ENV, name)
+                    )
             json.dumps(env, allow_nan=False, ensure_ascii=False).encode(
                 "utf-8"
             )

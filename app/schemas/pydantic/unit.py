@@ -170,6 +170,10 @@ class StateStorage(BaseModel):
     state: str
 
 
+class UnitEnvSizeRead(BaseModel):
+    max_chars: int
+
+
 class EnvJsonString(BaseModel):
     env_json_string: str
 

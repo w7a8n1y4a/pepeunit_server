@@ -16,6 +16,7 @@ from app.schemas.pydantic.unit import (
     SelectedVersionRead,
     StateStorage,
     UnitCreate,
+    UnitEnvSizeRead,
     UnitFilter,
     UnitLogFilter,
     UnitLogRead,
@@ -63,6 +64,13 @@ def get_env(
     if unit_service.access_service.current_agent.type == AgentType.UNIT:
         return PlainTextResponse(UnitEnvSerializer.serialize(env))
     return env
+
+
+@router.get("/env/{uuid}/max_size", response_model=UnitEnvSizeRead)
+def get_env_max_size(
+    uuid: uuid_pkg.UUID, unit_service: UnitService = Depends(get_unit_service)
+) -> UnitEnvSizeRead:
+    return unit_service.get_env_max_size(uuid)
 
 
 @router.get(

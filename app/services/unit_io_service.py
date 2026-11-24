@@ -5,7 +5,7 @@ import json
 import logging
 import uuid as uuid_pkg
 
-from fastapi import Depends
+from fastapi import Depends, UploadFile
 from pydantic import ValidationError
 
 from app import runtime, settings
@@ -637,7 +637,7 @@ class UnitIOService:
         return count, self.link_repository.get_by_nodes(unit_ios)
 
     async def check_data_pipe_config(
-        self, data_pipe
+        self, data_pipe: UploadFile, *, uuid: uuid_pkg.UUID | None = None
     ) -> list[DataPipeValidationErrorRead]:
         if not runtime.get().pu_ff_datapipe_enable:
             msg = "This feature has been disabled by the instance Owner"
@@ -647,11 +647,24 @@ class UnitIOService:
             [AgentType.BOT, AgentType.USER, AgentType.UNIT, AgentType.BACKEND]
         )
 
-        data_pipe_dict = await yml_file_to_dict(data_pipe)
+        field = None
+        if uuid is not None:
+            unit_io = self.unit_io_repository.get(UnitIO(uuid=uuid))
+            is_valid_object(unit_io, NotFoundEntity.UNIT_IO)
+            self.access_service.authorization.check_visibility(unit_io)
+            section = (
+                FieldKey.INPUT
+                if unit_io.type == UnitIOTypeEnum.INPUT
+                else FieldKey.OUTPUT
+            )
+            field = self.get_manifest_field(
+                unit_io,
+                section,
+                *self.read_selected_manifest(unit_io.unit_uuid),
+            )
 
-        return is_valid_data_pipe_config(
-            data_pipe_dict, is_business_validator=False
-        )
+        data_pipe_dict = await yml_file_to_dict(data_pipe)
+        return is_valid_data_pipe_config(data_pipe_dict, unit_io_field=field)
 
     async def set_data_pipe_config(
         self, uuid: uuid_pkg.UUID, data_pipe

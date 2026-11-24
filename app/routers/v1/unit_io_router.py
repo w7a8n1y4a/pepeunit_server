@@ -66,8 +66,9 @@ def set_state_input(
 async def check_data_pipe_config(
     data: UploadFile,
     unit_io_service: UnitIOService = Depends(get_unit_io_service),
-):
-    return await unit_io_service.check_data_pipe_config(data)
+    uuid: uuid_pkg.UUID | None = None,
+) -> list[DataPipeValidationErrorRead]:
+    return await unit_io_service.check_data_pipe_config(data, uuid=uuid)
 
 
 @router.post("/set_data_pipe_config", status_code=status.HTTP_204_NO_CONTENT)

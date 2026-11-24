@@ -10,12 +10,15 @@ from app.dto.enum import (
     ActivePeriodType,
     AggregationFunctions,
     DataPipeStage,
+    FieldKey,
+    FieldType,
     FilterTypeValueFiltering,
     FilterTypeValueThreshold,
     ProcessingPolicyType,
     TypeInputValue,
 )
 from app.schemas.pydantic.unit_io import DataPipeValidationErrorRead
+from app.schemas.pydantic.unit_manifest import FieldDeclaration
 from app.utils.utils import snake_to_camel
 
 
@@ -143,6 +146,40 @@ class FiltersConfig(BaseModel):
         self._validate_max_size()
         return self
 
+    def check_numeric_limits(
+        self, field: FieldDeclaration
+    ) -> list[DataPipeValidationErrorRead]:
+        lower = field[FieldKey.MIN]
+        upper = field[FieldKey.MAX]
+        values = []
+        if self.type_value_filtering and self.filtering_values:
+            values.extend(
+                (f"filtering_values[{index}]", value)
+                for index, value in enumerate(self.filtering_values)
+            )
+        if self.type_value_threshold in (
+            FilterTypeValueThreshold.MIN,
+            FilterTypeValueThreshold.RANGE,
+        ):
+            values.append(("threshold_min", self.threshold_min))
+        if self.type_value_threshold in (
+            FilterTypeValueThreshold.MAX,
+            FilterTypeValueThreshold.RANGE,
+        ):
+            values.append(("threshold_max", self.threshold_max))
+
+        issues = []
+        for name, value in values:
+            if isinstance(value, Real) and not lower <= value <= upper:
+                issues.append(
+                    DataPipeValidationErrorRead(
+                        stage=DataPipeStage.FILTERS,
+                        message=f"{name} must be within the UnitIO range [{lower}, {upper}]",
+                        error_code=ErrorCode.DATAPIPE_IO_RANGE_MISMATCH,
+                    )
+                )
+        return issues
+
 
 class TransformationConfig(BaseModel):
     multiplication_ratio: float | None = None
@@ -266,6 +303,73 @@ class DataPipeConfig(BaseModel):
         )
         return self
 
+    def check_unit_io(
+        self, field: FieldDeclaration
+    ) -> list[DataPipeValidationErrorRead]:
+        kind = FieldType(field[FieldKey.TYPE])
+        number_mode = self.filters.type_input_value == TypeInputValue.NUMBER
+        numeric_io = kind in (FieldType.INT, FieldType.FLOAT)
+        numeric_processing = number_mode and numeric_io
+        issues = []
+        if number_mode and not numeric_io:
+            issues.append(
+                DataPipeValidationErrorRead(
+                    stage=DataPipeStage.FILTERS,
+                    message=f"Number mode requires int or float UnitIO. This UnitIO is {kind.value}.",
+                    error_code=ErrorCode.DATAPIPE_IO_TYPE_MISMATCH,
+                )
+            )
+        elif numeric_processing:
+            issues.extend(self.filters.check_numeric_limits(field))
+        elif self.filters.type_value_threshold is not None:
+            issues.append(
+                DataPipeValidationErrorRead(
+                    stage=DataPipeStage.FILTERS,
+                    message="type_value_threshold is not applicable to Text input",
+                    error_code=ErrorCode.DATAPIPE_THRESHOLD_NOT_FOR_TEXT,
+                )
+            )
+
+        if (
+            self.processing_policy.policy_type
+            == ProcessingPolicyType.AGGREGATION
+            and not numeric_processing
+        ):
+            issues.append(
+                DataPipeValidationErrorRead(
+                    stage=DataPipeStage.PROCESSING_POLICY,
+                    message="Aggregation requires Number mode and an int or float UnitIO",
+                    error_code=ErrorCode.DATAPIPE_IO_TYPE_MISMATCH,
+                )
+            )
+
+        transformations = self.transformations
+        if transformations is None:
+            return issues
+        if not numeric_processing and (
+            transformations.multiplication_ratio is not None
+            or transformations.round_decimal_point is not None
+        ):
+            issues.append(
+                DataPipeValidationErrorRead(
+                    stage=DataPipeStage.TRANSFORMATIONS,
+                    message="Multiplication and rounding require Number mode and an int or float UnitIO",
+                    error_code=ErrorCode.DATAPIPE_IO_TYPE_MISMATCH,
+                )
+            )
+        if number_mode and (
+            transformations.slice_start is not None
+            or transformations.slice_end is not None
+        ):
+            issues.append(
+                DataPipeValidationErrorRead(
+                    stage=DataPipeStage.TRANSFORMATIONS,
+                    message="Slicing requires Text mode",
+                    error_code=ErrorCode.DATAPIPE_IO_TYPE_MISMATCH,
+                )
+            )
+        return issues
+
 
 def format_validation_error_dict(
     e: ValidationError,
@@ -288,26 +392,29 @@ def format_validation_error_dict(
 
 
 def is_valid_data_pipe_config(
-    data: dict, is_business_validator: bool = False
+    data: object,
+    is_business_validator: bool = False,
+    *,
+    unit_io_field: FieldDeclaration | None = None,
 ) -> DataPipeConfig | list[DataPipeValidationErrorRead]:
     if data is None:
         msg = "DataPipe is None"
         raise DataPipeError(msg, code=ErrorCode.DATAPIPE_IS_NONE)
 
+    try:
+        config = DataPipeConfig.model_validate(data)
+    except ValidationError as err:
+        if not is_business_validator:
+            return format_validation_error_dict(err)
+        first = err.errors()[0]
+        raise DataPipeError(
+            first["msg"],
+            code=ErrorCode.code_from_validation(
+                first, ErrorCode.DATAPIPE_CONFIG_INVALID
+            ),
+        ) from err
     if is_business_validator:
-        try:
-            return DataPipeConfig.model_validate(data)
-        except ValidationError as err:
-            first = err.errors()[0]
-            raise DataPipeError(
-                first["msg"],
-                code=ErrorCode.code_from_validation(
-                    first, ErrorCode.DATAPIPE_CONFIG_INVALID
-                ),
-            ) from err
-    else:
-        try:
-            DataPipeConfig.model_validate(data)
-            return []
-        except ValidationError as e:
-            return format_validation_error_dict(e)
+        return config
+    if unit_io_field is None:
+        return []
+    return config.check_unit_io(unit_io_field)

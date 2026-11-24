@@ -57,11 +57,6 @@ func main() {
 	if err := cfg.ApplyRuntime(runtimeSettings); err != nil {
 		logging.Fatalf("Invalid instance settings: %v", err)
 	}
-	if !cfg.DatapipeEnable {
-		logging.Infof("Data pipe is disabled")
-		return
-	}
-
 	logging.Infof(
 		"Data pipe config: domain=%s mqtt=%s:%d flush=%ds sync=%ds cleanup=%ds buffer=%d notifications=%t",
 		cfg.Domain,
@@ -116,6 +111,7 @@ func main() {
 		if err := logging.Configure(next.LogMinLevel, next.LogFormat); err != nil {
 			logging.Errorf("Invalid log settings: %v", err)
 		}
+		processor.SetDataPipeEnabled(next.DatapipeEnable)
 		if started.SamePipe(next) {
 			return false
 		}

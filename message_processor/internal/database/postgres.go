@@ -59,6 +59,8 @@ func (db *PostgresDB) LoadInstanceSettings(ctx context.Context) (config.RuntimeS
 			pu_datapipe_nrecords_cleanup_interval,
 			pu_ff_notification_enable,
 			pu_ff_datapipe_enable,
+			pu_instance_unit_state_send_interval,
+			pu_instance_unit_log_expiration,
 			pu_instance_log_min_level,
 			pu_instance_log_format
 		FROM instance_settings
@@ -73,6 +75,8 @@ func (db *PostgresDB) LoadInstanceSettings(ctx context.Context) (config.RuntimeS
 		&settings.NRecordsCleanupInterval,
 		&settings.NotificationEnable,
 		&settings.DatapipeEnable,
+		&settings.UnitStateSendInterval,
+		&settings.UnitLogExpiration,
 		&settings.LogMinLevel,
 		&settings.LogFormat,
 	)

@@ -19,11 +19,20 @@ func loadUnitConversions(ctx context.Context, snapshot *Snapshot) (map[unitPair]
 	pairs := make(map[unitPair]struct{})
 	for output, inputs := range snapshot.links {
 		source := snapshot.unitIOs[output].definition
-		if source["routing"] != broadcastRouting {
-			continue
-		}
 		for input := range inputs {
-			collectUnitPairs(source, snapshot.unitIOs[input].definition, pairs)
+			target := snapshot.unitIOs[input].definition
+			switch source["routing"] {
+			case broadcastRouting:
+				collectUnitPairs(source, target, pairs)
+			case selectedLinkRouting:
+				if variants, ok := source["variants"].(map[string]any); ok {
+					for action := range variants {
+						collectUnitPairs(selectedDataField(source, action), target, pairs)
+					}
+				} else {
+					collectUnitPairs(selectedDataField(source, ""), target, pairs)
+				}
+			}
 		}
 	}
 	if len(pairs) == 0 {

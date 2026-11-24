@@ -69,7 +69,6 @@ func (b *LastValueBuffer) Stop() {
 // Add adds a message to the buffer
 func (b *LastValueBuffer) Add(ctx context.Context, uuid uuid.UUID, state string, updateTime time.Time) error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 
 	b.updates[uuid] = struct {
 		State      string
@@ -79,7 +78,10 @@ func (b *LastValueBuffer) Add(ctx context.Context, uuid uuid.UUID, state string,
 		UpdateTime: updateTime,
 	}
 
-	if len(b.updates) >= b.maxSize {
+	shouldFlush := len(b.updates) >= b.maxSize
+	b.mu.Unlock()
+
+	if shouldFlush {
 		return b.Flush(ctx)
 	}
 

@@ -221,11 +221,6 @@ class UnitIOService:
             unit_io, [OwnershipType.CREATOR]
         )
 
-        is_standard_topic = self.is_standard_topic(unit_io.topic_name)
-        if is_standard_topic and data.is_data_pipe_active:
-            msg = "DataPipe cannot be activated for a standard IO"
-            raise DataPipeError(msg, code=ErrorCode.DATAPIPE_STANDARD_IO)
-
         if data.is_rewritable_input is not None:
             self.is_valid_input_unit_io(unit_io)
 
@@ -252,7 +247,6 @@ class UnitIOService:
         if (
             runtime.get().pu_ff_datapipe_enable
             and data.is_data_pipe_active is not None
-            and not is_standard_topic
         ):
             await run_in_threadpool(notify_message_processor)
 

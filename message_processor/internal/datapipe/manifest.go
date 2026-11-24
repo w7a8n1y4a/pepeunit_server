@@ -282,7 +282,7 @@ func (d *manifestDictionary) resolveTransport(field ioField, kind, direction str
 	if direction == outputDirection {
 		setFieldDefault(field, "routing", d.Defaults["routing"])
 		routing, _ := field["routing"].(string)
-		if !slices.Contains(d.Routing, routing) || (routing == "selected-link" && kind != "object") {
+		if !slices.Contains(d.Routing, routing) || (routing == selectedLinkRouting && kind != "object") {
 			return fmt.Errorf("invalid routing %q for type %s", routing, kind)
 		}
 	} else if _, exists := field["routing"]; exists {

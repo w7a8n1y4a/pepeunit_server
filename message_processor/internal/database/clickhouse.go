@@ -86,6 +86,33 @@ func (db *ClickHouseDB) Close() error {
 	return db.conn.Close()
 }
 
+type UnitLog struct {
+	UUID               uuid.UUID
+	UnitUUID           uuid.UUID
+	Level              string
+	Text               string
+	CreateDateTime     time.Time
+	ExpirationDateTime time.Time
+}
+
+func (db *ClickHouseDB) InsertUnitLogs(ctx context.Context, entries []UnitLog) error {
+	batch, err := db.conn.PrepareBatch(ctx, `
+		INSERT INTO unit_logs (uuid, unit_uuid, level, text, create_datetime, expiration_datetime)`)
+	if err != nil {
+		return err
+	}
+	defer batch.Close()
+
+	for _, entry := range entries {
+		if err := batch.Append(
+			entry.UUID, entry.UnitUUID, entry.Level, entry.Text, entry.CreateDateTime, entry.ExpirationDateTime,
+		); err != nil {
+			return err
+		}
+	}
+	return batch.Send()
+}
+
 // NLastEntry represents a record for the n_last_entry table
 type NLastEntry struct {
 	UnitIOUUID     uuid.UUID

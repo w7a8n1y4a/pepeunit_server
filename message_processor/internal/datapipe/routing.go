@@ -9,9 +9,16 @@ import (
 	"strings"
 
 	"message_processor/internal/logging"
+
+	"github.com/google/uuid"
 )
 
-const broadcastRouting = "broadcast"
+const (
+	broadcastRouting    = "broadcast"
+	selectedLinkRouting = "selected-link"
+	selectedInputKey    = "input_uuid"
+	selectedDataKey     = "data"
+)
 
 type publishMessage func(context.Context, string, []byte, byte) error
 
@@ -28,30 +35,64 @@ func (p *Processor) processUnitIOMessage(ctx context.Context, ioUUID string, pay
 	if err != nil {
 		return p.rejectMessage(ctx, source, err)
 	}
-	if source.Direction != outputDirection || source.definition["routing"] != broadcastRouting {
-		return nil
+	var routingError error
+	if source.Direction == outputDirection {
+		if err := p.processStandardOutput(ctx, snapshot, source, value, payload); err != nil {
+			return err
+		}
+		switch source.definition["routing"] {
+		case broadcastRouting:
+			var failures []error
+			for inputUUID := range snapshot.links[ioUUID] {
+				if err := p.forwardMessage(ctx, snapshot, snapshot.unitIOs[inputUUID], source.definition, value); err != nil {
+					failures = append(failures, err)
+				}
+			}
+			routingError = errors.Join(failures...)
+		case selectedLinkRouting:
+			envelope, _ := value.(map[string]any)
+			rawInput, _ := envelope[selectedInputKey].(string)
+			input, err := uuid.Parse(rawInput)
+			if err != nil {
+				return p.rejectMessage(ctx, source, errors.New("selected-link requires a valid input_uuid"))
+			}
+			inputUUID := input.String()
+			if _, linked := snapshot.links[ioUUID][inputUUID]; !linked {
+				return p.rejectMessage(ctx, source, fmt.Errorf("Input %s is not linked to this Output", inputUUID))
+			}
+			data, exists := envelope[selectedDataKey]
+			action, _ := envelope[variantAction].(string)
+			declaration := selectedDataField(source.definition, action)
+			if !exists || declaration == nil {
+				return p.rejectMessage(ctx, source, errors.New("selected-link requires declared data"))
+			}
+			routingError = p.forwardMessage(ctx, snapshot, snapshot.unitIOs[inputUUID], declaration, data)
+		}
 	}
+	return errors.Join(routingError, p.processDataPipe(ctx, ioUUID, payload, source.definition["codec"] == codecRaw))
+}
 
-	inputs := snapshot.links[ioUUID]
-	if len(inputs) != 0 && p.publish == nil {
+func selectedDataField(field ioField, action string) ioField {
+	data, _ := objectFields(field, action)[selectedDataKey].(ioField)
+	return data
+}
+
+func (p *Processor) forwardMessage(
+	ctx context.Context, snapshot *Snapshot, target snapshotUnitIO, source ioField, value any,
+) error {
+	encoded, qos, err := snapshot.forwardPayload(value, source, target.definition)
+	if err != nil {
+		return p.rejectMessage(ctx, target, err)
+	}
+	if p.publish == nil {
 		return errors.New("MQTT publisher is unavailable")
 	}
-	var failures []error
-	for inputUUID := range inputs {
-		target := snapshot.unitIOs[inputUUID]
-		encoded, qos, err := snapshot.forwardPayload(value, source.definition, target.definition)
-		if err != nil {
-			failures = append(failures, p.rejectMessage(ctx, target, err))
-			continue
-		}
-		topic := p.domain + "/" + inputUUID
-		if err := p.publish(ctx, topic, encoded, qos); err != nil {
-			err = fmt.Errorf("publish to UnitIO %s: %w", inputUUID, err)
-			logging.Warningf("%v", err)
-			failures = append(failures, err)
-		}
+	if err := p.publish(ctx, p.domain+"/"+target.UUID.String(), encoded, qos); err != nil {
+		err = fmt.Errorf("publish to UnitIO %s: %w", target.UUID, err)
+		logging.Warningf("%v", err)
+		return err
 	}
-	return errors.Join(failures...)
+	return nil
 }
 
 func (snapshot *Snapshot) forwardPayload(value any, source, target ioField) ([]byte, byte, error) {

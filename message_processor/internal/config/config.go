@@ -29,6 +29,8 @@ type RuntimeSettings struct {
 	NRecordsCleanupInterval int
 	NotificationEnable      bool
 	DatapipeEnable          bool
+	UnitStateSendInterval   int
+	UnitLogExpiration       int
 	LogMinLevel             string
 	LogFormat               string
 }
@@ -40,6 +42,7 @@ func (s RuntimeSettings) SamePipe(other RuntimeSettings) bool {
 	s.LogFormat = ""
 	other.LogMinLevel = ""
 	other.LogFormat = ""
+	s.DatapipeEnable = other.DatapipeEnable
 	return s == other
 }
 
@@ -63,6 +66,8 @@ type Config struct {
 	BufferMaxSize           int
 	NotificationEnable      bool
 	DatapipeEnable          bool
+	UnitStateSendInterval   int
+	UnitLogExpiration       int
 	LogMinLevel             string
 	LogFormat               string
 }
@@ -139,6 +144,8 @@ func (cfg *Config) ApplyRuntime(settings RuntimeSettings) error {
 	cfg.NRecordsCleanupInterval = settings.NRecordsCleanupInterval
 	cfg.NotificationEnable = settings.NotificationEnable
 	cfg.DatapipeEnable = settings.DatapipeEnable
+	cfg.UnitStateSendInterval = settings.UnitStateSendInterval
+	cfg.UnitLogExpiration = settings.UnitLogExpiration
 	cfg.LogMinLevel = settings.LogMinLevel
 	cfg.LogFormat = settings.LogFormat
 	return nil
@@ -154,6 +161,8 @@ func (cfg *Config) Runtime() RuntimeSettings {
 		NRecordsCleanupInterval: cfg.NRecordsCleanupInterval,
 		NotificationEnable:      cfg.NotificationEnable,
 		DatapipeEnable:          cfg.DatapipeEnable,
+		UnitStateSendInterval:   cfg.UnitStateSendInterval,
+		UnitLogExpiration:       cfg.UnitLogExpiration,
 		LogMinLevel:             cfg.LogMinLevel,
 		LogFormat:               cfg.LogFormat,
 	}

@@ -30,9 +30,10 @@ type snapshotUnitIO struct {
 }
 
 type Snapshot struct {
-	unitIOs     map[string]snapshotUnitIO
-	links       map[string]map[string]struct{}
-	conversions map[unitPair]affineConversion
+	unitIOs         map[string]snapshotUnitIO
+	links           map[string]map[string]struct{}
+	conversions     map[unitPair]affineConversion
+	selectedCommits map[uuid.UUID]string
 }
 
 func (p *Processor) startSnapshotSync(ctx context.Context) chan<- struct{} {
@@ -87,6 +88,7 @@ func (p *Processor) LoadSnapshot(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("load MessageProcessor UCUM conversions: %w", err)
 	}
+	snapshot.selectedCommits = commits
 	p.snapshot.Store(snapshot)
 	return nil
 }

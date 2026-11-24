@@ -17,15 +17,13 @@ import sys
 import time
 from pathlib import Path
 
-from app.configs.runtime import runtime
-
 
 class DataPipeSupervisor:
     """Keep one data pipe binary running for this working directory."""
 
     PID_PATH = Path("tmp/data_pipe.supervisor.pid")
     BINARY_PATH = Path("bin/data_pipe")
-    FLAG_WAIT_SECONDS = 5
+    RESTART_WAIT_SECONDS = 5
     POLL_SECONDS = 1
     STOP_TIMEOUT_SECONDS = 10
     KILL_WAIT_SECONDS = 5
@@ -36,8 +34,6 @@ class DataPipeSupervisor:
     def __init__(self) -> None:
         self._stop = False
         self._proc: subprocess.Popen[bytes] | None = None
-        self._enabled_flag = False
-        self._settings_error = False
 
     def serve(self) -> None:
         signal.signal(signal.SIGTERM, self._request_stop)
@@ -56,20 +52,12 @@ class DataPipeSupervisor:
 
     def _loop(self) -> None:
         while not self._stop:
-            if not self._enabled():
-                self._pause_while_disabled()
-                continue
             if not self._spawn():
-                if self._wait(self.FLAG_WAIT_SECONDS):
+                if self._wait(self.RESTART_WAIT_SECONDS):
                     return
                 continue
             if not self._finish_child(time.monotonic()):
                 return
-
-    def _pause_while_disabled(self) -> None:
-        self._stop_child()
-        self._proc = None
-        self._wait(self.FLAG_WAIT_SECONDS)
 
     def _finish_child(self, started: float) -> bool:
         """False means the supervisor itself is stopping."""
@@ -79,25 +67,12 @@ class DataPipeSupervisor:
         self._proc = None
         if self._stop:
             return False
-        if not self._enabled():
-            return not self._wait(self.FLAG_WAIT_SECONDS)
         # A fast exit is a crash. A long clean exit is a settings change.
         if code != 0 or lifetime < self.CRASH_SECONDS:
             logging.info("Data pipe exited with code %s", code)
-            return not self._wait(self.FLAG_WAIT_SECONDS)
+            return not self._wait(self.RESTART_WAIT_SECONDS)
         logging.info("Data pipe restarted after instance settings change")
         return True
-
-    def _enabled(self) -> bool:
-        try:
-            self._enabled_flag = bool(runtime.get().pu_ff_datapipe_enable)
-        except Exception:
-            if not self._settings_error:
-                logging.exception("Data pipe cannot read instance settings")
-            self._settings_error = True
-            return self._enabled_flag
-        self._settings_error = False
-        return self._enabled_flag
 
     def _spawn(self) -> bool:
         binary = self._binary_path()
@@ -116,9 +91,7 @@ class DataPipeSupervisor:
                 self._proc.wait(timeout=self.POLL_SECONDS)
                 return
             except subprocess.TimeoutExpired:
-                if not self._enabled():
-                    self._stop_child()
-                    return
+                continue
 
     def _stop_child(self) -> None:
         proc = self._proc

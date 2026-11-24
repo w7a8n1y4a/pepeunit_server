@@ -2,6 +2,7 @@ package datapipe
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"sync"
@@ -32,19 +33,22 @@ type NodeState struct {
 
 // Processor handles message processing and configuration management
 type Processor struct {
-	clickhouseDB  *database.ClickHouseDB
-	postgresDB    *database.PostgresDB
-	domain        string
-	repoCachePath string
-	configs       *DataPipeConfigs
-	snapshot      atomic.Pointer[Snapshot]
-	nodeStates    map[string]*NodeState
-	statesMu      sync.RWMutex
-	policy        *processing_policy.ProcessingPolicy
-	alertBuffer   *alerts.Buffer
-	cleanup       *cleanup.NRecordsCleanupService
-	notifications bool
-	publish       publishMessage
+	clickhouseDB      *database.ClickHouseDB
+	postgresDB        *database.PostgresDB
+	domain            string
+	repoCachePath     string
+	configs           *DataPipeConfigs
+	snapshot          atomic.Pointer[Snapshot]
+	nodeStates        map[string]*NodeState
+	statesMu          sync.RWMutex
+	policy            *processing_policy.ProcessingPolicy
+	alertBuffer       *alerts.Buffer
+	cleanup           *cleanup.NRecordsCleanupService
+	notifications     bool
+	dataPipeEnabled   atomic.Bool
+	firmwareWait      time.Duration
+	unitLogExpiration time.Duration
+	publish           publishMessage
 }
 
 // NewProcessor creates a new Processor instance
@@ -62,19 +66,27 @@ func NewProcessor(
 	alertBuffer := alerts.NewBuffer(postgresDB, flushInterval, cfg.BufferMaxSize)
 	cleanup := cleanup.NewNRecordsCleanupService(clickhouseDB, cfg)
 
-	return &Processor{
-		clickhouseDB:  clickhouseDB,
-		postgresDB:    postgresDB,
-		domain:        cfg.Domain,
-		repoCachePath: cfg.RepoCachePath,
-		configs:       NewDataPipeConfigs(cfg),
-		nodeStates:    make(map[string]*NodeState),
-		policy:        policy,
-		alertBuffer:   alertBuffer,
-		cleanup:       cleanup,
-		notifications: cfg.NotificationEnable,
-		publish:       publish,
+	processor := &Processor{
+		clickhouseDB:      clickhouseDB,
+		postgresDB:        postgresDB,
+		domain:            cfg.Domain,
+		repoCachePath:     cfg.RepoCachePath,
+		configs:           NewDataPipeConfigs(cfg),
+		nodeStates:        make(map[string]*NodeState),
+		policy:            policy,
+		alertBuffer:       alertBuffer,
+		cleanup:           cleanup,
+		notifications:     cfg.NotificationEnable,
+		publish:           publish,
+		firmwareWait:      2 * time.Duration(cfg.UnitStateSendInterval) * time.Second,
+		unitLogExpiration: time.Duration(cfg.UnitLogExpiration) * time.Second,
 	}
+	processor.SetDataPipeEnabled(cfg.DatapipeEnable)
+	return processor
+}
+
+func (p *Processor) SetDataPipeEnabled(enabled bool) {
+	p.dataPipeEnabled.Store(enabled)
 }
 
 // LoadNodeConfigs loads active node configurations from PostgreSQL
@@ -131,6 +143,13 @@ func (p *Processor) ProcessMessage(ctx context.Context, topic string, payload []
 		return apperr.New(apperr.InvalidTopic, "invalid topic format: %s", topic)
 	}
 
+	return p.processDataPipe(ctx, ioUUID, payload, false)
+}
+
+func (p *Processor) processDataPipe(ctx context.Context, ioUUID string, payload []byte, raw bool) error {
+	if !p.dataPipeEnabled.Load() {
+		return nil
+	}
 	config, target, exists := p.configs.Get(ioUUID)
 	if !exists {
 		return nil
@@ -142,17 +161,21 @@ func (p *Processor) ProcessMessage(ctx context.Context, topic string, payload []
 		return nil
 	}
 
+	message := string(payload)
+	if raw {
+		message = base64.StdEncoding.EncodeToString(payload)
+	}
 	nodeState := p.getNodeState(ioUUID)
-	shouldProcess := filters.ApplyFilters(string(payload), config.Filters, nodeState.LastMessageTime, nodeState.LastValue)
+	shouldProcess := filters.ApplyFilters(message, config.Filters, nodeState.LastMessageTime, nodeState.LastValue)
 	if !shouldProcess {
 		return nil
 	}
 
-	transformedValue := string(payload)
+	transformedValue := message
 	if config.Transformations != nil {
 		// Apply transformations
 		var err error
-		transformedValue, err = transformations.ApplyTransformations(string(payload), config.Transformations, &config.Filters)
+		transformedValue, err = transformations.ApplyTransformations(message, config.Transformations, &config.Filters)
 		if err != nil {
 			logging.Errorf("Failed to apply transformations for node %s: %v", ioUUID, err)
 			return nil

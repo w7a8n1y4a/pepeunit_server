@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -83,4 +84,32 @@ func (db *PostgresDB) SetLastMessageError(ctx context.Context, ioUUID uuid.UUID,
 	return db.Exec(ctx, `
 		UPDATE units_io SET last_message_error = $2
 		WHERE uuid = $1 AND last_message_error IS DISTINCT FROM $2`, ioUUID, reason)
+}
+
+func (db *PostgresDB) UpdateUnitState(
+	ctx context.Context, unitUUID uuid.UUID, state, deviceCommit string, updateConfirmed bool, now time.Time, firmwareWait time.Duration,
+) error {
+	return db.Exec(ctx, `
+		UPDATE units SET
+			unit_state_dict = $2,
+			current_commit_version = $3,
+			last_update_datetime = GREATEST(last_update_datetime, $5),
+			(firmware_update_status, firmware_update_error, last_firmware_update_datetime) = (
+				SELECT COALESCE(status, firmware_update_status),
+					CASE status WHEN 'Success' THEN NULL WHEN 'Error' THEN $7::text ELSE firmware_update_error END,
+					CASE WHEN status IS NULL THEN last_firmware_update_datetime END
+				FROM (SELECT CASE
+					WHEN firmware_update_status IS DISTINCT FROM 'RequestSent' THEN NULL
+					WHEN $4::boolean THEN 'Success'
+					WHEN last_firmware_update_datetime < $6 THEN 'Error'
+				END AS status) AS firmware
+			)
+		WHERE uuid = $1`, unitUUID, state, deviceCommit, updateConfirmed, now, now.Add(-firmwareWait),
+		fmt.Sprintf("Firmware update was not confirmed within %s", firmwareWait))
+}
+
+func (db *PostgresDB) TouchUnit(ctx context.Context, unitUUID uuid.UUID, now time.Time) error {
+	return db.Exec(ctx, `
+		UPDATE units SET last_update_datetime = GREATEST(last_update_datetime, $2)
+		WHERE uuid = $1`, unitUUID, now)
 }

@@ -3,7 +3,7 @@ package datapipe
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"io"
 	"maps"
@@ -46,8 +46,8 @@ type manifestDictionary struct {
 }
 
 type manifestIO struct {
-	input  map[string]json.RawMessage
-	output map[string]json.RawMessage
+	input  ioDeclarations
+	output ioDeclarations
 }
 
 func loadManifestIO(
@@ -148,7 +148,7 @@ func loadManifestDictionary(contract string) (*manifestDictionary, error) {
 
 func (d *manifestDictionary) resolveIO(
 	fields ioDeclarations, direction string, std, opposite ioDeclarations,
-) (map[string]json.RawMessage, error) {
+) (ioDeclarations, error) {
 	for name, field := range fields {
 		_, reserved := std[name]
 		if _, wrongDirection := opposite[name]; wrongDirection || reserved && (field == nil || len(field) != 0) {
@@ -159,7 +159,7 @@ func (d *manifestDictionary) resolveIO(
 		fields = make(ioDeclarations)
 	}
 	maps.Copy(fields, std)
-	resolved := make(map[string]json.RawMessage, len(fields))
+	resolved := make(ioDeclarations, len(fields))
 	for name, field := range fields {
 		if !d.ioName.MatchString(name) {
 			return nil, fmt.Errorf("invalid %s name %q", direction, name)
@@ -167,9 +167,13 @@ func (d *manifestDictionary) resolveIO(
 		if err := d.resolveField(field, direction); err != nil {
 			return nil, fmt.Errorf("%s %q: %w", direction, name, err)
 		}
-		definition, err := json.Marshal(field)
+		encoded, err := json.Marshal(field, jsonFloatEncoder)
 		if err != nil {
 			return nil, fmt.Errorf("encode %s %q: %w", direction, name, err)
+		}
+		var definition ioField
+		if err := decodeJSON(encoded, &definition); err != nil {
+			return nil, fmt.Errorf("decode %s %q: %w", direction, name, err)
 		}
 		resolved[name] = definition
 	}
@@ -262,9 +266,9 @@ func (d *manifestDictionary) resolveTransport(field ioField, kind, direction str
 	setFieldDefault(field, "codec", defaultCodec)
 	setFieldDefault(field, "qos", d.Defaults["qos"])
 	codec, _ := field["codec"].(string)
-	codecValid := codec == "json" && kind != "bytes" ||
-		codec == "utf8" && kind == "string" || codec == "raw" && kind == "bytes"
-	if !codecValid || (codec != "json" && field["nullable"] == true) {
+	codecValid := codec == codecJSON && kind != "bytes" ||
+		codec == codecUTF8 && kind == "string" || codec == codecRaw && kind == "bytes"
+	if !codecValid || (codec != codecJSON && field["nullable"] == true) {
 		return fmt.Errorf("codec %q does not support this type or nullability", codec)
 	}
 	qos, ok := field["qos"].(int)

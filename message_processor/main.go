@@ -87,8 +87,6 @@ func main() {
 	defer redisDB.Close()
 
 	processor := datapipe.NewProcessor(clickhouseDB, postgresDB, cfg)
-	configs := datapipe.NewDataPipeConfigs(cfg)
-	processor.SetConfigs(configs)
 	if err := processor.LoadNodeConfigs(ctx); err != nil {
 		logging.Fatalf("Failed to load node configurations: %v", err)
 	}
@@ -101,9 +99,7 @@ func main() {
 		}
 	}
 
-	mqttClient, err := mqtt_client.New(cfg, messageHandler, postgresDB, func(ctx context.Context) error {
-		return processor.LoadNodeConfigs(ctx)
-	})
+	mqttClient, err := mqtt_client.New(cfg, messageHandler)
 	if err != nil {
 		logging.Fatalf("Failed to create MQTT client: %v", err)
 	}

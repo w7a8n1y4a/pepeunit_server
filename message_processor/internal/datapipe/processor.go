@@ -34,6 +34,7 @@ type NodeState struct {
 type Processor struct {
 	clickhouseDB  *database.ClickHouseDB
 	postgresDB    *database.PostgresDB
+	domain        string
 	repoCachePath string
 	configs       *DataPipeConfigs
 	snapshot      atomic.Pointer[Snapshot]
@@ -61,6 +62,7 @@ func NewProcessor(clickhouseDB *database.ClickHouseDB, postgresDB *database.Post
 	return &Processor{
 		clickhouseDB:  clickhouseDB,
 		postgresDB:    postgresDB,
+		domain:        cfg.Domain,
 		repoCachePath: cfg.RepoCachePath,
 		configs:       NewDataPipeConfigs(cfg),
 		nodeStates:    make(map[string]*NodeState),
@@ -112,6 +114,13 @@ func (p *Processor) getNodeState(ioUUID string) *NodeState {
 
 // ProcessMessage processes a message from a topic
 func (p *Processor) ProcessMessage(ctx context.Context, topic string, payload []byte) error {
+	if domain, ioUUID, ok := strings.Cut(topic, "/"); ok && !strings.Contains(ioUUID, "/") {
+		if domain != p.domain || uuid.Validate(ioUUID) != nil {
+			return apperr.New(apperr.InvalidTopic, "invalid UnitIO topic: %s", topic)
+		}
+		return p.validateMessage(ioUUID, payload)
+	}
+
 	// Extract the IO UUID from the topic
 	ioUUID := extractIOUUID(topic)
 	if ioUUID == "" {
@@ -192,6 +201,21 @@ func (p *Processor) ProcessMessage(ctx context.Context, topic string, payload []
 	return nil
 }
 
+func (p *Processor) validateMessage(ioUUID string, payload []byte) error {
+	snapshot := p.snapshot.Load()
+	if snapshot == nil {
+		return fmt.Errorf("MessageProcessor schemas have not been loaded")
+	}
+	node, exists := snapshot.unitIOs[ioUUID]
+	if !exists {
+		return fmt.Errorf("UnitIO %s has no loaded schema", ioUUID)
+	}
+	if _, err := decodePayload(node.definition, payload); err != nil {
+		return fmt.Errorf("UnitIO %s: %w", ioUUID, err)
+	}
+	return nil
+}
+
 // extractIOUUID extracts the IO UUID from a topic
 func extractIOUUID(topic string) string {
 	// Topic format: pu_dp_domain/io_uuid
@@ -200,9 +224,4 @@ func extractIOUUID(topic string) string {
 		return ""
 	}
 	return parts[1]
-}
-
-// SetConfigs sets the DataPipeConfigs instance
-func (p *Processor) SetConfigs(configs *DataPipeConfigs) {
-	p.configs = configs
 }

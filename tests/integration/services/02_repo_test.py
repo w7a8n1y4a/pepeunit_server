@@ -433,9 +433,8 @@ def test_get_available_platforms(
     )
     assert len(platforms) == 0
 
-    commits = service.git_repo_repository.get_branch_commits_with_tag(
-        universal_repo, branch
-    )
+    git_repository = service.git_repo_repository
+    commits = git_repository.get_branch_commits(universal_repo, branch)
     platforms = service.get_available_platforms(
         universal_repo.uuid,
         target_commit=commits[-1]["commit"],
@@ -443,7 +442,9 @@ def test_get_available_platforms(
     )
     assert len(platforms) == 0
 
-    tags = service.git_repo_repository.get_tags_from_all_commits(commits)
+    tags = git_repository.get_branch_tagged_commits_page(
+        universal_repo, branch, 0, 1
+    )
     platforms = service.get_available_platforms(
         universal_repo.uuid,
         target_commit=tags[0]["commit"],

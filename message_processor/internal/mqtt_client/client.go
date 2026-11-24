@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"message_processor/internal/config"
-	"message_processor/internal/database"
 	"message_processor/internal/logging"
 
 	"github.com/eclipse/paho.golang/autopaho"
@@ -33,17 +32,6 @@ const (
 	mqttSubscribeLock = "tmp/mqtt_subscribe.lock"
 )
 
-type SubscribeOptions struct {
-	Topic string
-	QoS   byte
-}
-
-type ClientOption func(*MQTTClient)
-
-func WithReconnectInterval(interval time.Duration) ClientOption {
-	return func(c *MQTTClient) {}
-}
-
 type MQTTClient struct {
 	cfg            *config.Config
 	cm             *autopaho.ConnectionManager
@@ -59,11 +47,9 @@ type MQTTClient struct {
 	// callback cannot abort resubscribe on the live connection.
 	connGen     uint64
 	connectOnce sync.Once
-	postgresDB  *database.PostgresDB
-	loadConfigs func(ctx context.Context) error
 }
 
-func New(cfg *config.Config, messageHandler func(topic string, payload []byte), postgresDB *database.PostgresDB, loadConfigs func(ctx context.Context) error) (*MQTTClient, error) {
+func New(cfg *config.Config, messageHandler func(topic string, payload []byte)) (*MQTTClient, error) {
 	if cfg == nil {
 		return nil, errors.New("config cannot be nil")
 	}
@@ -80,8 +66,6 @@ func New(cfg *config.Config, messageHandler func(topic string, payload []byte), 
 		messageHandler: messageHandler,
 		ctx:            ctx,
 		cancel:         cancel,
-		postgresDB:     postgresDB,
-		loadConfigs:    loadConfigs,
 	}
 
 	return client, nil
@@ -368,28 +352,6 @@ func (c *MQTTClient) Disconnect() {
 	}
 }
 
-func (c *MQTTClient) Unsubscribe(topic string) error {
-	ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
-	defer cancel()
-
-	c.connMu.RLock()
-	connected := c.connected
-	cm := c.cm
-	c.connMu.RUnlock()
-
-	if connected && cm != nil {
-		_, err := cm.Unsubscribe(ctx, &paho.Unsubscribe{
-			Topics: []string{topic},
-		})
-		if err != nil {
-			return fmt.Errorf("failed to unsubscribe from topic %s: %w", topic, err)
-		}
-		logging.Infof("Active subscriptions: %d", c.GetSubscriptionCount())
-	}
-
-	return nil
-}
-
 func generateToken(cfg *config.Config) (string, error) {
 	claims := jwt.MapClaims{
 		"domain": cfg.Domain,
@@ -404,25 +366,4 @@ func generateToken(cfg *config.Config) (string, error) {
 	}
 
 	return signedToken, nil
-}
-
-func (c *MQTTClient) GetSubscriptionCount() int {
-	return 1 // Since we're subscribing to a single topic
-}
-
-func (c *MQTTClient) GetActiveTopics(ctx context.Context) ([]string, error) {
-	nodes, err := c.postgresDB.GetActiveUnitIOs(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get active nodes: %w", err)
-	}
-
-	topics := make([]string, 0, len(nodes))
-	for _, node := range nodes {
-		if node.DataPipeYML != nil {
-			topic := fmt.Sprintf("%s/%s", c.cfg.Domain, node.UUID)
-			topics = append(topics, topic)
-		}
-	}
-
-	return topics, nil
 }

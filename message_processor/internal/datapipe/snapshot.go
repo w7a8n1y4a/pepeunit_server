@@ -26,7 +26,7 @@ type manifestVersion struct {
 
 type snapshotUnitIO struct {
 	database.ProcessorUnitIO
-	definition json.RawMessage
+	definition ioField
 }
 
 type Snapshot struct {
@@ -129,7 +129,7 @@ func buildSnapshot(rows database.ProcessorRows, units map[uuid.UUID]manifestIO) 
 	counts := make(map[uuid.UUID]int, len(units))
 	for _, node := range rows.UnitIOs {
 		definitions := units[node.UnitUUID]
-		var definition json.RawMessage
+		var definition ioField
 		switch node.Direction {
 		case inputDirection:
 			definition = definitions.input[node.TopicName]

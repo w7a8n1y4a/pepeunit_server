@@ -261,14 +261,6 @@ class GitRepoRepository:
             skip=skip,
         )
 
-    def get_branch_commits_with_tag(
-        self, repo: Repo, branch: str
-    ) -> list[dict]:
-        return self._with_tags(
-            repo,
-            self.get_branch_commits(repo, branch),
-        )
-
     def get_branch_commits_page(
         self,
         repo: Repo,
@@ -393,10 +385,6 @@ class GitRepoRepository:
             {"commit": sha, "summary": summaries[sha], "tag": tag}
             for sha, tag in page
         ]
-
-    @staticmethod
-    def get_tags_from_all_commits(commits: list[dict]) -> list[dict]:
-        return [commit for commit in commits if commit["tag"]]
 
     def get_commit_with_tag(
         self, repo: Repo, branch: str, commit: str

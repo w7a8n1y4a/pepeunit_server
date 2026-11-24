@@ -368,10 +368,9 @@ def test_auto_update_firmware_unit(
 
     repo_svc = repo_service(database, token)
     repo = repo_svc.read(source.repo_uuid)
-    commits_with_tag = service.git_repo_repository.get_branch_commits_with_tag(
-        repo, source.target_branch
+    _, tags = service.git_repo_repository.query_branch_commits(
+        repo, source.target_branch, 0, 1, only_tag=True, search=None
     )
-    tags = service.git_repo_repository.get_tags_from_all_commits(commits_with_tag)
     tag_commit = tags[0]["commit"]
 
     def bulk_reached() -> bool:

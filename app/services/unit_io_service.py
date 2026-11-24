@@ -58,6 +58,7 @@ from app.repositories.unit_log_repository import UnitLogRepository
 from app.repositories.unit_repository import UnitRepository
 from app.schemas.mqtt.utils import publish_to_topic
 from app.schemas.pydantic.unit_io import (
+    DataPipeConfigOptionsRead,
     DataPipeFilter,
     DataPipeValidationErrorRead,
     LinkCompatibilityRead,
@@ -92,7 +93,7 @@ from app.services.validators import (
 )
 from app.utils.utils import async_chunked, obj_serializer, remove_dict_none
 from app.validators.content_size import is_valid_content_size
-from app.validators.data_pipe import is_valid_data_pipe_config
+from app.validators.data_pipe import DataPipeConfig, is_valid_data_pipe_config
 from app.validators.data_pipe_user_csv import StreamingCSVValidator
 
 
@@ -636,9 +637,7 @@ class UnitIOService:
 
         return count, self.link_repository.get_by_nodes(unit_ios)
 
-    async def check_data_pipe_config(
-        self, data_pipe: UploadFile, *, uuid: uuid_pkg.UUID | None = None
-    ) -> list[DataPipeValidationErrorRead]:
+    def check_data_pipe_preview_access(self) -> None:
         if not runtime.get().pu_ff_datapipe_enable:
             msg = "This feature has been disabled by the instance Owner"
             raise FeatureFlagError(msg, code=ErrorCode.FEATURE_DISABLED)
@@ -647,22 +646,31 @@ class UnitIOService:
             [AgentType.BOT, AgentType.USER, AgentType.UNIT, AgentType.BACKEND]
         )
 
-        field = None
-        if uuid is not None:
-            unit_io = self.unit_io_repository.get(UnitIO(uuid=uuid))
-            is_valid_object(unit_io, NotFoundEntity.UNIT_IO)
-            self.access_service.authorization.check_visibility(unit_io)
-            section = (
-                FieldKey.INPUT
-                if unit_io.type == UnitIOTypeEnum.INPUT
-                else FieldKey.OUTPUT
-            )
-            field = self.get_manifest_field(
-                unit_io,
-                section,
-                *self.read_selected_manifest(unit_io.unit_uuid),
-            )
+    def read_data_pipe_field(self, uuid: uuid_pkg.UUID) -> FieldDeclaration:
+        unit_io = self.unit_io_repository.get(UnitIO(uuid=uuid))
+        is_valid_object(unit_io, NotFoundEntity.UNIT_IO)
+        self.access_service.authorization.check_visibility(unit_io)
+        section = (
+            FieldKey.INPUT
+            if unit_io.type == UnitIOTypeEnum.INPUT
+            else FieldKey.OUTPUT
+        )
+        return self.get_manifest_field(
+            unit_io, section, *self.read_selected_manifest(unit_io.unit_uuid)
+        )
 
+    def get_data_pipe_config_options(
+        self, uuid: uuid_pkg.UUID
+    ) -> DataPipeConfigOptionsRead:
+        self.check_data_pipe_preview_access()
+        field = self.read_data_pipe_field(uuid)
+        return DataPipeConfig.options_for_unit_io(field)
+
+    async def check_data_pipe_config(
+        self, data_pipe: UploadFile, *, uuid: uuid_pkg.UUID | None = None
+    ) -> list[DataPipeValidationErrorRead]:
+        self.check_data_pipe_preview_access()
+        field = self.read_data_pipe_field(uuid) if uuid is not None else None
         data_pipe_dict = await yml_file_to_dict(data_pipe)
         return is_valid_data_pipe_config(data_pipe_dict, unit_io_field=field)
 

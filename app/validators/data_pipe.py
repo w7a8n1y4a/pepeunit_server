@@ -1,5 +1,7 @@
 import datetime
+from math import ceil, floor
 from numbers import Real
+from typing import ClassVar
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
@@ -10,6 +12,7 @@ from app.dto.enum import (
     ActivePeriodType,
     AggregationFunctions,
     DataPipeStage,
+    DataPipeTransformationField,
     FieldKey,
     FieldType,
     FilterTypeValueFiltering,
@@ -17,7 +20,12 @@ from app.dto.enum import (
     ProcessingPolicyType,
     TypeInputValue,
 )
-from app.schemas.pydantic.unit_io import DataPipeValidationErrorRead
+from app.schemas.pydantic.unit_io import (
+    DataPipeConfigOptionsRead,
+    DataPipeModeOptions,
+    DataPipeNumericRange,
+    DataPipeValidationErrorRead,
+)
 from app.schemas.pydantic.unit_manifest import FieldDeclaration
 from app.utils.utils import snake_to_camel
 
@@ -147,10 +155,10 @@ class FiltersConfig(BaseModel):
         return self
 
     def check_numeric_limits(
-        self, field: FieldDeclaration
+        self, numeric_range: DataPipeNumericRange
     ) -> list[DataPipeValidationErrorRead]:
-        lower = field[FieldKey.MIN]
-        upper = field[FieldKey.MAX]
+        lower = numeric_range.min
+        upper = numeric_range.max
         values = []
         if self.type_value_filtering and self.filtering_values:
             values.extend(
@@ -182,6 +190,15 @@ class FiltersConfig(BaseModel):
 
 
 class TransformationConfig(BaseModel):
+    NUMBER_FIELDS: ClassVar[tuple[DataPipeTransformationField, ...]] = (
+        DataPipeTransformationField.MULTIPLICATION_RATIO,
+        DataPipeTransformationField.ROUND_DECIMAL_POINT,
+    )
+    TEXT_FIELDS: ClassVar[tuple[DataPipeTransformationField, ...]] = (
+        DataPipeTransformationField.SLICE_START,
+        DataPipeTransformationField.SLICE_END,
+    )
+
     multiplication_ratio: float | None = None
     round_decimal_point: int | None = Field(default=None, ge=0, le=7)
     slice_start: int | None = None
@@ -303,25 +320,73 @@ class DataPipeConfig(BaseModel):
         )
         return self
 
+    @staticmethod
+    def options_for_unit_io(
+        field: FieldDeclaration,
+    ) -> DataPipeConfigOptionsRead:
+        kind = FieldType(field[FieldKey.TYPE])
+        modes = {
+            TypeInputValue.TEXT: DataPipeModeOptions(
+                policy_types=tuple(
+                    item
+                    for item in ProcessingPolicyType
+                    if item != ProcessingPolicyType.AGGREGATION
+                ),
+                transformation_fields=TransformationConfig.TEXT_FIELDS,
+            ),
+        }
+        numeric_range = None
+        if kind in (FieldType.INT, FieldType.FLOAT):
+            numeric_range = DataPipeNumericRange(
+                min=field[FieldKey.MIN],
+                max=field[FieldKey.MAX],
+            )
+            first_integer = ceil(numeric_range.min)
+            last_integer = floor(numeric_range.max)
+            threshold_types = ()
+            if first_integer < last_integer:
+                threshold_types = tuple(FilterTypeValueThreshold)
+            elif first_integer == last_integer:
+                threshold_types = (
+                    FilterTypeValueThreshold.MIN,
+                    FilterTypeValueThreshold.MAX,
+                )
+            modes[TypeInputValue.NUMBER] = DataPipeModeOptions(
+                policy_types=tuple(ProcessingPolicyType),
+                threshold_types=threshold_types,
+                aggregation_functions=tuple(AggregationFunctions),
+                transformation_fields=TransformationConfig.NUMBER_FIELDS,
+            )
+        return DataPipeConfigOptionsRead(
+            value_type=kind,
+            modes=modes,
+            numeric_filter_range=numeric_range,
+            time_window_sizes=settings.pu_time_window_sizes,
+        )
+
     def check_unit_io(
         self, field: FieldDeclaration
     ) -> list[DataPipeValidationErrorRead]:
-        kind = FieldType(field[FieldKey.TYPE])
-        number_mode = self.filters.type_input_value == TypeInputValue.NUMBER
-        numeric_io = kind in (FieldType.INT, FieldType.FLOAT)
-        numeric_processing = number_mode and numeric_io
+        options = self.options_for_unit_io(field)
+        mode = options.modes.get(self.filters.type_input_value)
+        threshold = self.filters.type_value_threshold
         issues = []
-        if number_mode and not numeric_io:
+        if mode is None:
             issues.append(
                 DataPipeValidationErrorRead(
                     stage=DataPipeStage.FILTERS,
-                    message=f"Number mode requires int or float UnitIO. This UnitIO is {kind.value}.",
+                    message=f"Number mode requires int or float UnitIO. This UnitIO is {options.value_type.value}.",
                     error_code=ErrorCode.DATAPIPE_IO_TYPE_MISMATCH,
                 )
             )
-        elif numeric_processing:
-            issues.extend(self.filters.check_numeric_limits(field))
-        elif self.filters.type_value_threshold is not None:
+        elif (
+            self.filters.type_input_value == TypeInputValue.NUMBER
+            and options.numeric_filter_range is not None
+        ):
+            issues.extend(
+                self.filters.check_numeric_limits(options.numeric_filter_range)
+            )
+        elif threshold is not None and threshold not in mode.threshold_types:
             issues.append(
                 DataPipeValidationErrorRead(
                     stage=DataPipeStage.FILTERS,
@@ -330,11 +395,8 @@ class DataPipeConfig(BaseModel):
                 )
             )
 
-        if (
-            self.processing_policy.policy_type
-            == ProcessingPolicyType.AGGREGATION
-            and not numeric_processing
-        ):
+        policies = (mode or options.modes[TypeInputValue.TEXT]).policy_types
+        if self.processing_policy.policy_type not in policies:
             issues.append(
                 DataPipeValidationErrorRead(
                     stage=DataPipeStage.PROCESSING_POLICY,
@@ -346,10 +408,14 @@ class DataPipeConfig(BaseModel):
         transformations = self.transformations
         if transformations is None:
             return issues
-        if not numeric_processing and (
-            transformations.multiplication_ratio is not None
-            or transformations.round_decimal_point is not None
-        ):
+        allowed_fields = mode.transformation_fields if mode else ()
+        invalid_fields = {
+            name
+            for name in DataPipeTransformationField
+            if name not in allowed_fields
+            and getattr(transformations, name) is not None
+        }
+        if invalid_fields.intersection(TransformationConfig.NUMBER_FIELDS):
             issues.append(
                 DataPipeValidationErrorRead(
                     stage=DataPipeStage.TRANSFORMATIONS,
@@ -357,10 +423,7 @@ class DataPipeConfig(BaseModel):
                     error_code=ErrorCode.DATAPIPE_IO_TYPE_MISMATCH,
                 )
             )
-        if number_mode and (
-            transformations.slice_start is not None
-            or transformations.slice_end is not None
-        ):
+        if invalid_fields.intersection(TransformationConfig.TEXT_FIELDS):
             issues.append(
                 DataPipeValidationErrorRead(
                     stage=DataPipeStage.TRANSFORMATIONS,

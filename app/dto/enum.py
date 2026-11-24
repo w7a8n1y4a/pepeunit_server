@@ -434,6 +434,13 @@ class FilterTypeValueThreshold(str, enum.Enum):
     RANGE = "Range"
 
 
+class DataPipeTransformationField(str, enum.Enum):
+    MULTIPLICATION_RATIO = "multiplication_ratio"
+    ROUND_DECIMAL_POINT = "round_decimal_point"
+    SLICE_START = "slice_start"
+    SLICE_END = "slice_end"
+
+
 class ProcessingPolicyType(str, enum.Enum):
     LAST_VALUE = "LastValue"
     N_RECORDS = "NRecords"

@@ -13,9 +13,13 @@ from app.dto.clickhouse.time_window import TimeWindow
 from app.dto.enum import (
     AggregationFunctions,
     DataPipeStage,
+    DataPipeTransformationField,
+    FieldType,
+    FilterTypeValueThreshold,
     MqttQos,
     OrderByDate,
     ProcessingPolicyType,
+    TypeInputValue,
     UnitIOCompatibilityIssue,
     UnitIOTypeEnum,
     VisibilityLevel,
@@ -83,6 +87,25 @@ class LinkCompatibilityRead(BaseModel):
 class LinkCreate(BaseModel):
     output_uuid: uuid_pkg.UUID
     input_uuid: uuid_pkg.UUID
+
+
+class DataPipeModeOptions(BaseModel):
+    policy_types: tuple[ProcessingPolicyType, ...]
+    threshold_types: tuple[FilterTypeValueThreshold, ...] = ()
+    aggregation_functions: tuple[AggregationFunctions, ...] = ()
+    transformation_fields: tuple[DataPipeTransformationField, ...]
+
+
+class DataPipeNumericRange(BaseModel):
+    min: int | float
+    max: int | float
+
+
+class DataPipeConfigOptionsRead(BaseModel):
+    value_type: FieldType
+    modes: dict[TypeInputValue, DataPipeModeOptions]
+    numeric_filter_range: DataPipeNumericRange | None = None
+    time_window_sizes: list[int]
 
 
 class DataPipeValidationErrorRead(BaseModel):

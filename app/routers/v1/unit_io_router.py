@@ -8,6 +8,7 @@ from starlette.responses import FileResponse
 from app.configs.rest import get_unit_io_service
 from app.schemas.pydantic.shared import UnitIORead, UnitIOsResult
 from app.schemas.pydantic.unit_io import (
+    DataPipeConfigOptionsRead,
     DataPipeFilter,
     DataPipeValidationErrorRead,
     LinkCompatibilityRead,
@@ -58,6 +59,17 @@ def set_state_input(
     unit_io_service: UnitIOService = Depends(get_unit_io_service),
 ):
     return UnitIORead(**unit_io_service.set_state_input(uuid, data).dict())
+
+
+@router.get(
+    "/get_data_pipe_config_options/{uuid}",
+    response_model=DataPipeConfigOptionsRead,
+)
+def get_data_pipe_config_options(
+    uuid: uuid_pkg.UUID,
+    unit_io_service: UnitIOService = Depends(get_unit_io_service),
+) -> DataPipeConfigOptionsRead:
+    return unit_io_service.get_data_pipe_config_options(uuid)
 
 
 @router.post(

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"data_pipe/internal/apperr"
@@ -33,7 +34,9 @@ type NodeState struct {
 type Processor struct {
 	clickhouseDB  *database.ClickHouseDB
 	postgresDB    *database.PostgresDB
+	repoCachePath string
 	configs       *DataPipeConfigs
+	snapshot      atomic.Pointer[Snapshot]
 	nodeStates    map[string]*NodeState
 	statesMu      sync.RWMutex
 	policy        *processing_policy.ProcessingPolicy
@@ -58,6 +61,7 @@ func NewProcessor(clickhouseDB *database.ClickHouseDB, postgresDB *database.Post
 	return &Processor{
 		clickhouseDB:  clickhouseDB,
 		postgresDB:    postgresDB,
+		repoCachePath: cfg.RepoCachePath,
 		configs:       NewDataPipeConfigs(cfg),
 		nodeStates:    make(map[string]*NodeState),
 		policy:        policy,
@@ -74,7 +78,7 @@ func (p *Processor) LoadNodeConfigs(ctx context.Context) error {
 
 // StartConfigSync starts background processes for configuration synchronization
 func (p *Processor) StartConfigSync(ctx context.Context, redisDB *database.RedisDB) {
-	p.configs.StartConfigSync(ctx, p.postgresDB, redisDB)
+	p.configs.StartConfigSync(ctx, p.postgresDB, redisDB, p.startSnapshotSync(ctx))
 }
 
 // Start starts the processor

@@ -110,7 +110,9 @@ func (c *DataPipeConfigs) LoadNodeConfigs(ctx context.Context, postgresDB *datab
 
 const messageProcessorStream = "backend_message_processor"
 
-func (c *DataPipeConfigs) StartConfigSync(ctx context.Context, postgresDB *database.PostgresDB, redisDB *database.RedisDB) {
+func (c *DataPipeConfigs) StartConfigSync(
+	ctx context.Context, postgresDB *database.PostgresDB, redisDB *database.RedisDB, snapshots chan<- struct{},
+) {
 	changes := make(chan int)
 	go func() {
 		defer close(changes)
@@ -167,6 +169,10 @@ func (c *DataPipeConfigs) StartConfigSync(ctx context.Context, postgresDB *datab
 			case <-periodic.C:
 			}
 
+			select {
+			case snapshots <- struct{}{}:
+			default:
+			}
 			if err := c.LoadNodeConfigs(ctx, postgresDB); err != nil {
 				logging.Errorf("Failed to reload configurations: %v", err)
 				continue

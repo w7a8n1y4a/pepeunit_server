@@ -11,6 +11,7 @@ require (
 	github.com/jackc/pgx/v5 v5.12.0
 	github.com/joho/godotenv v1.5.1
 	github.com/redis/go-redis/v9 v9.23.0
+	go.yaml.in/yaml/v3 v3.0.5
 )
 
 require (

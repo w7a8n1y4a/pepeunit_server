@@ -7,6 +7,7 @@ import uuid as uuid_pkg
 
 from fastapi import Depends, UploadFile
 from pydantic import ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from app import runtime, settings
 from app.configs.error_codes import ErrorCode
@@ -253,7 +254,7 @@ class UnitIOService:
             and data.is_data_pipe_active is not None
             and not is_standard_topic
         ):
-            await notify_message_processor()
+            await run_in_threadpool(notify_message_processor)
 
         return unit_io_updated
 
@@ -599,6 +600,7 @@ class UnitIOService:
             )
 
         link = self.link_repository.create(new_link)
+        notify_message_processor()
 
         with contextlib.suppress(MqttError):
             self.command_to_input_base_topic(
@@ -696,7 +698,7 @@ class UnitIOService:
             data_pipe_entity.dict(), default=obj_serializer
         )
         self.unit_io_repository.update(uuid, unit_io)
-        await notify_message_processor()
+        await run_in_threadpool(notify_message_processor)
 
     def get_data_pipe_config(self, uuid: uuid_pkg.UUID) -> str:
         if not runtime.get().pu_ff_datapipe_enable:
@@ -860,6 +862,7 @@ class UnitIOService:
             # so there should be immunity to this error.
 
         self.link_repository.delete(link)
+        notify_message_processor()
 
         with contextlib.suppress(MqttError):
             self.command_to_input_base_topic(

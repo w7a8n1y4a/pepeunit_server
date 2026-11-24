@@ -23,6 +23,7 @@ from app.configs.errors import (
     UnitError,
     UnitIOError,
 )
+from app.configs.redis import notify_message_processor
 from app.domain.operation_task_model import OperationTask
 from app.domain.repo_model import Repo
 from app.domain.unit_io_model import UnitIO
@@ -155,6 +156,7 @@ class UnitService:
             if isinstance(error, IntegrityError):
                 self.unit_repository.raise_name_conflict(error)
             raise
+        notify_message_processor()
         return snapshot
 
     def select_unit_manifest(
@@ -281,6 +283,7 @@ class UnitService:
         uuid = unit.uuid
         result = self.unit_io_service.synchronize(unit, manifest)
         self.unit_repository.db.commit()
+        notify_message_processor()
         try:
             self.unit_io_service.command_to_input_base_topic(
                 uuid=uuid,
@@ -663,6 +666,7 @@ class UnitService:
         unit_ios_deep = copy.deepcopy(unit_ios)
 
         self.unit_repository.delete(unit)
+        notify_message_processor()
 
         # clickhouse data clear
         self.unit_io_service.data_pipe_repository.bulk_delete(

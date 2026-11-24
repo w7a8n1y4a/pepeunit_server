@@ -29,6 +29,9 @@ from app.utils.utils import clean_files_with_pepeignore
 class GitRepoRepository:
     COMMIT_FORMAT = "%H%x00%s"
 
+    def __init__(self, *, local_only: bool = False) -> None:
+        self.local_only = local_only
+
     @staticmethod
     def get_path_physic_repository(repo: Repo):
         return f"{settings.pu_save_repo_path}/{repo.uuid}"
@@ -131,6 +134,8 @@ class GitRepoRepository:
         try:
             return self._open(path)
         except GitRepoError:
+            if self.local_only:
+                raise
             self.clone(self._cloning_url(repo), path)
             return self._open(path)
 

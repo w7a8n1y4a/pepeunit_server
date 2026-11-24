@@ -48,6 +48,7 @@ func (s RuntimeSettings) SamePipe(other RuntimeSettings) bool {
 // without overriding variables that are already set.
 // RuntimeSettings come from Postgres.
 type Config struct {
+	RepoCachePath           string
 	Domain                  string
 	SecretKey               string
 	PostgresURL             string
@@ -67,6 +68,7 @@ type Config struct {
 }
 
 type envSettings struct {
+	RepoCachePath string `env:"PU_SAVE_REPO_PATH" envDefault:"repo_cache"`
 	Domain        string `env:"PU_DOMAIN,required"`
 	SecretKey     string `env:"PU_SECRET_KEY,required"`
 	PostgresURL   string `env:"PU_SQLALCHEMY_DATABASE_URL,required"`
@@ -87,6 +89,7 @@ func LoadEnv() (*Config, error) {
 	}
 
 	cfg := &Config{
+		RepoCachePath: parsed.RepoCachePath,
 		Domain:        parsed.Domain,
 		SecretKey:     parsed.SecretKey,
 		PostgresURL:   normalizePostgresURL(parsed.PostgresURL),

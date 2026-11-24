@@ -108,6 +108,13 @@ class UnitIOCompatibilityIssue(str, enum.Enum):
     ENUM = "enum"
 
 
+class UnitSchemaWarningKind(str, enum.Enum):
+    ADDED = "added"
+    REMOVED = "removed"
+    CHANGED = "changed"
+    TYPE_CHANGED = "type_changed"
+
+
 class UnitFirmwareUpdateStatus(str, enum.Enum):
     """
     Unit update status

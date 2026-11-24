@@ -68,6 +68,7 @@ from app.schemas.pydantic.unit import (
     UnitLogFilter,
     UnitRead,
     UnitUpdate,
+    UnitUpdatePreviewRead,
 )
 from app.schemas.pydantic.unit_io import (
     UnitIOFilter,
@@ -87,6 +88,7 @@ from app.services.permission_service import PermissionService
 from app.services.unit_env_serializer import UnitEnvSerializer
 from app.services.unit_env_size import UnitEnvSize
 from app.services.unit_io_service import UnitIOService
+from app.services.unit_manifest_diff import UnitManifestDiff
 from app.services.unit_manifest_service import UnitManifestService
 from app.services.utils import get_topic_name
 from app.services.validators import (
@@ -198,13 +200,7 @@ class UnitService:
             self.access_service.authorization.check_ownership(
                 unit, [OwnershipType.CREATOR]
             )
-            if unit.is_auto_update_unit and data.is_auto_update_unit is False:
-                unit.target_commit = None
-            unit.sqlmodel_update(
-                data.model_dump(
-                    exclude_none=True, exclude={"is_compilable_unit"}
-                )
-            )
+            self.apply_unit_update_fields(unit, data)
             self.unit_repository.is_valid_name(unit.name)
             return self.apply_version_update(unit, suppress_mqtt_error=True)
         except Exception as error:
@@ -212,6 +208,61 @@ class UnitService:
             if isinstance(error, IntegrityError):
                 self.unit_repository.raise_name_conflict(error)
             raise
+
+    @staticmethod
+    def apply_unit_update_fields(unit: Unit, data: UnitUpdate) -> None:
+        if unit.is_auto_update_unit and data.is_auto_update_unit is False:
+            unit.target_commit = None
+        unit.sqlmodel_update(
+            data.model_dump(exclude_none=True, exclude={"is_compilable_unit"})
+        )
+
+    def check_manual_update(
+        self, uuid: uuid_pkg.UUID, data: UnitUpdate
+    ) -> UnitUpdatePreviewRead:
+        self.access_service.authorization.check_access([AgentType.USER])
+        unit = self.unit_repository.get(Unit(uuid=uuid))
+        is_valid_object(unit, NotFoundEntity.UNIT)
+        self.access_service.authorization.check_ownership(
+            unit, [OwnershipType.CREATOR]
+        )
+
+        candidate = Unit(**unit.model_dump())
+        self.apply_unit_update_fields(candidate, data)
+        if candidate.is_auto_update_unit:
+            msg = "Update preview is available for manual updates only"
+            raise UnitError(
+                msg, code=ErrorCode.UNIT_UPDATE_PREVIEW_MANUAL_ONLY
+            )
+
+        repo = self.repo_repository.get(Repo(uuid=unit.repo_uuid))
+        is_valid_object(repo, NotFoundEntity.REPO)
+        selected_commit, _ = (
+            self.git_repo_repository.get_selected_commit_and_tag(repo, unit)
+        )
+        target_commit, _, after, after_dictionary = self.select_unit_manifest(
+            repo, candidate
+        )
+        warnings = []
+        if selected_commit != target_commit:
+            before, before_dictionary = (
+                self.unit_manifest_service.read_from_commit(
+                    repo, selected_commit
+                )
+            )
+            warnings = list(
+                UnitManifestDiff.compare(
+                    before,
+                    after,
+                    self.env_fields(before, before_dictionary),
+                    self.env_fields(after, after_dictionary),
+                )
+            )
+        return UnitUpdatePreviewRead(
+            selected_commit=selected_commit,
+            target_commit=target_commit,
+            warnings=warnings,
+        )
 
     def apply_version_update(
         self, unit: Unit, *, suppress_mqtt_error: bool = False

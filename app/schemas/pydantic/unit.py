@@ -6,11 +6,13 @@ from fastapi import Query
 from pydantic import BaseModel, root_validator
 
 from app.dto.enum import (
+    FieldType,
     LogLevel,
     OrderByDate,
     OrderByText,
     UnitFirmwareUpdateStatus,
     UnitIOTypeEnum,
+    UnitSchemaWarningKind,
     VisibilityLevel,
 )
 from app.schemas.pydantic.pagination import BasePaginationRestMixin
@@ -99,6 +101,19 @@ class UnitLogsResult(BaseModel):
 class SelectedVersionRead(BaseModel):
     commit: str
     tag: str | None = None
+
+
+class UnitSchemaWarningRead(BaseModel):
+    kind: UnitSchemaWarningKind
+    path: tuple[str, ...]
+    before_type: FieldType | None = None
+    after_type: FieldType | None = None
+
+
+class UnitUpdatePreviewRead(BaseModel):
+    selected_commit: str
+    target_commit: str
+    warnings: list[UnitSchemaWarningRead]
 
 
 class UnitCreate(BaseModel):

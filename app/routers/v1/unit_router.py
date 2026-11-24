@@ -26,6 +26,7 @@ from app.schemas.pydantic.unit import (
     UnitRead,
     UnitsResult,
     UnitUpdate,
+    UnitUpdatePreviewRead,
 )
 from app.services.unit_env_serializer import UnitEnvSerializer
 from app.services.unit_service import UnitService
@@ -178,6 +179,19 @@ def get_mqtt_auth(data: UnitMqttTokenAuth):
             return MqttRead(result="deny")
 
     return MqttRead(result="allow")
+
+
+@router.post(
+    "/check_manual_update/{uuid}",
+    response_model=UnitUpdatePreviewRead,
+    response_model_exclude_none=True,
+)
+def check_manual_update(
+    uuid: uuid_pkg.UUID,
+    data: UnitUpdate,
+    unit_service: UnitService = Depends(get_unit_service),
+) -> UnitUpdatePreviewRead:
+    return unit_service.check_manual_update(uuid, data)
 
 
 @router.patch("/{uuid}", response_model=UnitRead)

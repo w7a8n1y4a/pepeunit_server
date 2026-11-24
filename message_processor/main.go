@@ -94,6 +94,7 @@ func main() {
 		logging.Fatalf("Failed to load node configurations: %v", err)
 	}
 	processor.Start(ctx)
+	defer processor.Stop()
 
 	if err := mqttClient.Connect(); err != nil {
 		logging.Fatalf("Failed to connect to MQTT broker: %v", err)

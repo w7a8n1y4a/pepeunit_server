@@ -49,6 +49,7 @@ type Processor struct {
 	firmwareWait      time.Duration
 	unitLogExpiration time.Duration
 	publish           publishMessage
+	resources         *resourceBuffer
 }
 
 // NewProcessor creates a new Processor instance
@@ -82,6 +83,10 @@ func NewProcessor(
 		unitLogExpiration: time.Duration(cfg.UnitLogExpiration) * time.Second,
 	}
 	processor.SetDataPipeEnabled(cfg.DatapipeEnable)
+	processor.resources = newResourceBuffer(clickhouseDB, flushInterval, cfg.BufferMaxSize)
+	clickhouseDB.SetDataPipeWriteRecorder(func(unitIOUUID uuid.UUID, at time.Time, size uint64) {
+		processor.resources.add(at, database.UnitIOResourceWindow{UnitIOUUID: unitIOUUID, DataPipeBytes: size})
+	})
 	return processor
 }
 
@@ -101,6 +106,7 @@ func (p *Processor) StartConfigSync(ctx context.Context, redisDB *database.Redis
 
 // Start starts the processor
 func (p *Processor) Start(ctx context.Context) {
+	p.resources.start(ctx)
 	p.policy.Start(ctx)
 	if p.notifications {
 		p.alertBuffer.Start(ctx)
@@ -113,6 +119,7 @@ func (p *Processor) Stop() {
 	p.policy.Stop()
 	p.alertBuffer.Stop()
 	p.cleanup.Stop()
+	p.resources.stop()
 }
 
 // getNodeState returns or creates a NodeState for the given node
@@ -134,7 +141,7 @@ func (p *Processor) ProcessMessage(ctx context.Context, topic string, payload []
 		if domain != p.domain || uuid.Validate(ioUUID) != nil {
 			return apperr.New(apperr.InvalidTopic, "invalid UnitIO topic: %s", topic)
 		}
-		return p.processUnitIOMessage(ctx, ioUUID, payload)
+		return p.processUnitIOMessage(ctx, ioUUID, payload, time.Now())
 	}
 
 	// Extract the IO UUID from the topic

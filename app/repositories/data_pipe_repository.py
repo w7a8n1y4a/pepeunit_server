@@ -67,6 +67,25 @@ class DataPipeRepository:
             case ProcessingPolicyType.AGGREGATION:
                 return Aggregation
 
+    def list_resource_windows(
+        self, unit_io_uuid: uuid.UUID, now: datetime
+    ) -> list[tuple[datetime, datetime, int, int, int]]:
+        return self.client.execute(
+            """
+            WITH toDateTime(%(now)s, 'UTC') AS current_time
+            SELECT start_window_datetime, end_window_datetime,
+                sum(total_requests), sum(total_bytes),
+                sum(total_datapipe_bytes_increment)
+            FROM unit_io_resources_aggregation
+            WHERE unit_io_uuid = %(uuid)s
+                AND start_window_datetime <= current_time
+                AND end_window_datetime + INTERVAL 90 DAY > current_time
+            GROUP BY start_window_datetime, end_window_datetime
+            ORDER BY start_window_datetime
+            """,
+            {"uuid": unit_io_uuid, "now": int(now.timestamp())},
+        )
+
     def list_postgres(
         self, filters: DataPipeFilter
     ) -> tuple[int, list[LastValue]]:

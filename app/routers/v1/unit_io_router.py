@@ -16,6 +16,7 @@ from app.schemas.pydantic.unit_io import (
     LinkRead,
     PipeDataResult,
     UnitIOFilter,
+    UnitIOResourceWindowRead,
     UnitIOSetState,
     UnitIOUpdate,
 )
@@ -30,6 +31,14 @@ def get(
     unit_io_service: UnitIOService = Depends(get_unit_io_service),
 ):
     return UnitIORead(**unit_io_service.get(uuid).dict())
+
+
+@router.get("/{uuid}/resources", response_model=list[UnitIOResourceWindowRead])
+def get_resource_windows(
+    uuid: uuid_pkg.UUID,
+    unit_io_service: UnitIOService = Depends(get_unit_io_service),
+) -> list[UnitIOResourceWindowRead]:
+    return unit_io_service.get_resource_windows(uuid)
 
 
 @router.patch("/{uuid}", response_model=UnitIORead)

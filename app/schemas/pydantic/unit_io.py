@@ -46,6 +46,14 @@ class UnitIOUpdate(BaseModel):
     max_connections: int | None = None
 
 
+class UnitIOResourceWindowRead(BaseModel):
+    start_window_datetime: datetime.datetime
+    end_window_datetime: datetime.datetime
+    requests_per_second: float
+    bytes_per_second: float
+    total_datapipe_bytes_increment: int
+
+
 class UnitIOSetState(BaseModel):
     state: str
 

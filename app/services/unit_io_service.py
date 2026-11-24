@@ -65,6 +65,7 @@ from app.schemas.pydantic.unit_io import (
     LinkCompatibilityRead,
     LinkCreate,
     UnitIOFilter,
+    UnitIOResourceWindowRead,
     UnitIOSetState,
     UnitIOUpdate,
 )
@@ -92,7 +93,12 @@ from app.services.validators import (
     is_valid_uuid,
     is_valid_visibility_level,
 )
-from app.utils.utils import async_chunked, obj_serializer, remove_dict_none
+from app.utils.utils import (
+    async_chunked,
+    ensure_timezone_aware,
+    obj_serializer,
+    remove_dict_none,
+)
 from app.validators.content_size import is_valid_content_size
 from app.validators.data_pipe import DataPipeConfig, is_valid_data_pipe_config
 from app.validators.data_pipe_user_csv import StreamingCSVValidator
@@ -127,10 +133,35 @@ class UnitIOService:
             [AgentType.BOT, AgentType.USER, AgentType.UNIT]
         )
         unit_io = self.unit_io_repository.get(UnitIO(uuid=uuid))
-        self.access_service.authorization.check_visibility(unit_io)
-
         is_valid_object(unit_io, NotFoundEntity.UNIT_IO)
+        self.access_service.authorization.check_visibility(unit_io)
         return unit_io
+
+    def get_resource_windows(
+        self, uuid: uuid_pkg.UUID
+    ) -> list[UnitIOResourceWindowRead]:
+        unit_io = self.get(uuid)
+        now = datetime.datetime.now(datetime.UTC)
+        rows = self.data_pipe_repository.list_resource_windows(
+            unit_io.uuid, now
+        )
+        windows = []
+        for window_start, window_end, requests, size, datapipe_size in rows:
+            start = ensure_timezone_aware(window_start)
+            end = ensure_timezone_aware(window_end)
+            elapsed = (min(now, end) - start).total_seconds()
+            windows.append(
+                UnitIOResourceWindowRead(
+                    start_window_datetime=start,
+                    end_window_datetime=end,
+                    requests_per_second=requests / elapsed
+                    if elapsed > 0
+                    else 0,
+                    bytes_per_second=size / elapsed if elapsed > 0 else 0,
+                    total_datapipe_bytes_increment=datapipe_size,
+                )
+            )
+        return windows
 
     @staticmethod
     def is_standard_topic(name: str) -> bool:

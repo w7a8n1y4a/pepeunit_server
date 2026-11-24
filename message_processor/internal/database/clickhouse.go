@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"net/url"
 	"strings"
@@ -12,7 +13,12 @@ import (
 )
 
 type ClickHouseDB struct {
-	conn clickhouse.Conn
+	conn                clickhouse.Conn
+	recordDataPipeWrite func(uuid.UUID, time.Time, uint64)
+}
+
+func (db *ClickHouseDB) SetDataPipeWriteRecorder(record func(uuid.UUID, time.Time, uint64)) {
+	db.recordDataPipeWrite = record
 }
 
 type clickHouseTarget struct {
@@ -113,6 +119,17 @@ func (db *ClickHouseDB) InsertUnitLogs(ctx context.Context, entries []UnitLog) e
 	return batch.Send()
 }
 
+const (
+	nLastEntryFixedBytes  = 16 + 1 + 8 + 4 + 4
+	windowEntryFixedBytes = 16 + 1 + 8 + 4 + 4
+	aggregationEntryBytes = 16 + 8 + 1 + 4 + 8 + 8 + 8
+)
+
+func serializedStringBytes(value string) uint64 {
+	var prefix [binary.MaxVarintLen64]byte
+	return uint64(len(value) + binary.PutUvarint(prefix[:], uint64(len(value))))
+}
+
 // NLastEntry represents a record for the n_last_entry table
 type NLastEntry struct {
 	UnitIOUUID     uuid.UUID
@@ -129,6 +146,7 @@ func (db *ClickHouseDB) BulkCreateNLastEntries(ctx context.Context, entries []NL
 	if err != nil {
 		return fmt.Errorf("failed to prepare batch: %w", err)
 	}
+	defer batch.Close()
 
 	for _, entry := range entries {
 		err := batch.Append(
@@ -147,7 +165,12 @@ func (db *ClickHouseDB) BulkCreateNLastEntries(ctx context.Context, entries []NL
 	if err := batch.Send(); err != nil {
 		return fmt.Errorf("failed to send batch: %w", err)
 	}
-
+	if record := db.recordDataPipeWrite; record != nil {
+		writtenAt := time.Now()
+		for _, entry := range entries {
+			record(entry.UnitIOUUID, writtenAt, nLastEntryFixedBytes+serializedStringBytes(entry.State))
+		}
+	}
 	return nil
 }
 
@@ -167,6 +190,7 @@ func (db *ClickHouseDB) BulkCreateWindowEntries(ctx context.Context, entries []W
 	if err != nil {
 		return fmt.Errorf("failed to prepare batch: %w", err)
 	}
+	defer batch.Close()
 
 	for _, entry := range entries {
 		err := batch.Append(
@@ -185,7 +209,12 @@ func (db *ClickHouseDB) BulkCreateWindowEntries(ctx context.Context, entries []W
 	if err := batch.Send(); err != nil {
 		return fmt.Errorf("failed to send batch: %w", err)
 	}
-
+	if record := db.recordDataPipeWrite; record != nil {
+		writtenAt := time.Now()
+		for _, entry := range entries {
+			record(entry.UnitIOUUID, writtenAt, windowEntryFixedBytes+serializedStringBytes(entry.State))
+		}
+	}
 	return nil
 }
 
@@ -206,6 +235,7 @@ func (db *ClickHouseDB) BulkCreateAggregationEntries(ctx context.Context, entrie
 	if err != nil {
 		return fmt.Errorf("failed to prepare batch: %w", err)
 	}
+	defer batch.Close()
 
 	for _, entry := range entries {
 		err := batch.Append(
@@ -225,7 +255,12 @@ func (db *ClickHouseDB) BulkCreateAggregationEntries(ctx context.Context, entrie
 	if err := batch.Send(); err != nil {
 		return fmt.Errorf("failed to send batch: %w", err)
 	}
-
+	if record := db.recordDataPipeWrite; record != nil {
+		writtenAt := time.Now()
+		for _, entry := range entries {
+			record(entry.UnitIOUUID, writtenAt, aggregationEntryBytes)
+		}
+	}
 	return nil
 }
 

@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
+
+	"message_processor/internal/database"
 
 	"message_processor/internal/logging"
 
@@ -22,7 +25,7 @@ const (
 
 type publishMessage func(context.Context, string, []byte, byte) error
 
-func (p *Processor) processUnitIOMessage(ctx context.Context, ioUUID string, payload []byte) error {
+func (p *Processor) processUnitIOMessage(ctx context.Context, ioUUID string, payload []byte, receivedAt time.Time) error {
 	snapshot := p.snapshot.Load()
 	if snapshot == nil {
 		return errors.New("MessageProcessor schemas have not been loaded")
@@ -30,6 +33,11 @@ func (p *Processor) processUnitIOMessage(ctx context.Context, ioUUID string, pay
 	source, exists := snapshot.unitIOs[ioUUID]
 	if !exists {
 		return fmt.Errorf("UnitIO %s has no loaded schema", ioUUID)
+	}
+	if p.resources != nil {
+		p.resources.add(receivedAt, database.UnitIOResourceWindow{
+			UnitIOUUID: source.UUID, Requests: 1, Bytes: uint64(len(payload)),
+		})
 	}
 	value, err := decodePayload(source.definition, payload)
 	if err != nil {

@@ -8,10 +8,10 @@ ARG TARGETARCH
 
 WORKDIR /src
 
-COPY data_pipe/go.mod data_pipe/go.sum ./
+COPY message_processor/go.mod message_processor/go.sum ./
 RUN go mod download
 
-COPY data_pipe/ ./
+COPY message_processor/ ./
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     go build -ldflags="-s -w" -o /out/data_pipe .

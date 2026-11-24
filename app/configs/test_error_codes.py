@@ -7,7 +7,7 @@ from app.dto.enum import JsonPayload, NotFoundEntity, UuidEntity
 
 ROOT = Path(__file__).resolve().parents[2]
 APP = ROOT / "app"
-GO_ROOT = ROOT / "data_pipe"
+GO_ROOT = ROOT / "message_processor"
 GO_CODE = re.compile(r"^\s*(\w+)\s+Code\s*=\s*(\d+)\s*$", re.MULTILINE)
 
 USER_EXCEPTIONS = {

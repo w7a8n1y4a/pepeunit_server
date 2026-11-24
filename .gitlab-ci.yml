@@ -78,7 +78,7 @@ variables:
           -e HOME=/tmp -e GOPATH=/tmp/go -e GOCACHE=/tmp/gocache \
           -e GODEBUG=tlsmlkem=0 \
           -e GOVULNCHECK_VERSION="$GOVULNCHECK_VERSION" \
-          -v "$CI_PROJECT_DIR:/src" -w /src/data_pipe \
+          -v "$CI_PROJECT_DIR:/src" -w /src/message_processor \
           "$GO_IMAGE" sh -c 'go install "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" >&2 && /tmp/go/bin/govulncheck "$@"' govulncheck "$@"
       }
 

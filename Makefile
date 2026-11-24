@@ -60,7 +60,7 @@ migrate-rollback:
 build-data-pipe:
 	@echo "Build data pipe..."
 	@mkdir -p bin
-	cd data_pipe && CGO_ENABLED=0 go build -ldflags="-s -w" -o ../bin/data_pipe .
+	cd message_processor && CGO_ENABLED=0 go build -ldflags="-s -w" -o ../bin/data_pipe .
 
 start: clean
 	@$(MAKE) --no-print-directory build-data-pipe

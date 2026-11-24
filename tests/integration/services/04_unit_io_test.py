@@ -164,9 +164,7 @@ async def test_get_data_pipe_config(
         service.get_data_pipe_config(output_unit_io[0].uuid)
 
 
-def test_create_link(
-    running_units, chain_links, regular_user_token, database, cc
-) -> None:
+def test_create_link(running_units, chain_links, regular_user_token) -> None:
     token = regular_user_token
     target_units = running_units.chain()
     marked = time.time()
@@ -187,15 +185,9 @@ def test_create_link(
         message="schema.json was not refreshed after SchemaUpdate",
     )
 
-    service = unit_io_service(database, cc, token)
-    _, source_inputs = service.list(
-        UnitIOFilter(unit_uuid=target_units[0].uuid, type=[UnitIOTypeEnum.INPUT])
-    )
-    _, source_outputs = service.list(
-        UnitIOFilter(unit_uuid=target_units[0].uuid, type=[UnitIOTypeEnum.OUTPUT])
-    )
-    source_input_uuid = source_inputs[0].uuid
-    source_output_uuid = source_outputs[0].uuid
+    source_input, source_output = chain_links[0]
+    source_input_uuid = source_input.uuid
+    source_output_uuid = source_output.uuid
 
     state = "0"
     wait_until(
@@ -247,11 +239,15 @@ async def test_set_state_input_unit_io(
     unit_svc = unit_service(database, cc, regular_user_token)
     unit_token = unit_svc.generate_token(compile_unit.uuid)
 
-    count, unit_ios = service.list(
-        UnitIOFilter(unit_uuid=compile_unit.uuid, type=[UnitIOTypeEnum.INPUT])
+    _, unit_ios = service.list(
+        UnitIOFilter.unlimited(
+            unit_uuid=compile_unit.uuid, type=[UnitIOTypeEnum.INPUT]
+        )
     )
-    io_uuid = unit_ios[0].uuid
-    state = "test"
+    io_uuid = next(
+        io.uuid for io in unit_ios if io.topic_name == "input_counter"
+    )
+    state = "0"
     assert patch_input_state(unit_token, io_uuid, state) >= 400
 
     await service.update(io_uuid, UnitIOUpdate(is_rewritable_input=True))

@@ -1,3 +1,4 @@
+import base64
 import contextlib
 import datetime
 import json
@@ -5,6 +6,7 @@ import logging
 import uuid as uuid_pkg
 
 from fastapi import Depends
+from pydantic import ValidationError
 
 from app import runtime, settings
 from app.configs.error_codes import ErrorCode
@@ -35,6 +37,7 @@ from app.dto.enum import (
     NotFoundEntity,
     OrderByDate,
     OwnershipType,
+    PayloadCodec,
     PermissionEntities,
     ProcessingPolicyType,
     ReservedEnvVariableName,
@@ -88,6 +91,7 @@ from app.services.validators import (
     is_valid_visibility_level,
 )
 from app.utils.utils import async_chunked, obj_serializer, remove_dict_none
+from app.validators.content_size import is_valid_content_size
 from app.validators.data_pipe import is_valid_data_pipe_config
 from app.validators.data_pipe_user_csv import StreamingCSVValidator
 
@@ -257,11 +261,11 @@ class UnitIOService:
 
         return self.unit_io_repository.update(uuid, update_unit_io)
 
-    def set_state_input(
+    def check_input_state(
         self,
         uuid: uuid_pkg.UUID,
         data: UnitIOSetState,
-    ) -> UnitIO:
+    ) -> tuple[UnitIO, bytes]:
         self.access_service.authorization.check_access(
             [AgentType.USER, AgentType.UNIT]
         )
@@ -274,7 +278,73 @@ class UnitIOService:
         )
         self.access_service.authorization.check_visibility(unit_io)
 
-        publish_to_topic(get_topic_name(unit_io.uuid), data.state)
+        selected_commit, manifest = self.read_selected_manifest(
+            unit_io.unit_uuid
+        )
+        field = self.get_manifest_field(
+            unit_io, FieldKey.INPUT, selected_commit, manifest
+        )
+        codec = field[FieldKey.CODEC]
+        state = data.state
+        try:
+            payload = (
+                base64.b64decode(state, validate=True)
+                if codec == PayloadCodec.RAW
+                else state.encode("utf-8")
+            )
+        except ValueError as error:
+            msg = (
+                "Input state must be valid Base64"
+                if codec == PayloadCodec.RAW
+                else "Input state must be valid UTF-8"
+            )
+            raise UnitIOError(
+                msg, code=ErrorCode.UNIT_IO_STATE_INVALID
+            ) from error
+
+        max_payload_bytes = runtime.get().pu_mqtt_max_payload_size * 1024
+        is_valid_content_size(
+            payload,
+            max_payload_bytes,
+            code=ErrorCode.MQTT_PAYLOAD_TOO_LARGE,
+            message=f"Input payload exceeds {max_payload_bytes} bytes",
+            error_type=MqttError,
+        )
+
+        value = payload if codec == PayloadCodec.RAW else state
+        if codec == PayloadCodec.JSON:
+            try:
+                value = is_valid_json(state, JsonPayload.UNIT_IO_STATE)
+                json.dumps(value, allow_nan=False, ensure_ascii=False).encode(
+                    "utf-8"
+                )
+            except (ValueError, RecursionError) as error:
+                msg = "Input state must contain finite UTF-8 JSON values"
+                raise UnitIOError(
+                    msg, code=ErrorCode.UNIT_IO_STATE_JSON_INVALID
+                ) from error
+        elif codec == PayloadCodec.UTF8 and "\x00" in state:
+            msg = "Input state cannot store a NUL character"
+            raise UnitIOError(msg, code=ErrorCode.UNIT_IO_STATE_INVALID)
+
+        try:
+            manifest.validate_literal(
+                field, value, (FieldKey.INPUT, unit_io.topic_name)
+            )
+        except ValidationError as error:
+            raise UnitIOError(
+                str(error), code=ErrorCode.UNIT_IO_STATE_INVALID
+            ) from error
+
+        return unit_io, payload
+
+    def set_state_input(
+        self,
+        uuid: uuid_pkg.UUID,
+        data: UnitIOSetState,
+    ) -> UnitIO:
+        unit_io, payload = self.check_input_state(uuid, data)
+        publish_to_topic(get_topic_name(unit_io.uuid), payload)
 
         unit_io.state = data.state
         unit_io.last_update_datetime = datetime.datetime.now(datetime.UTC)
@@ -421,7 +491,7 @@ class UnitIOService:
         self.access_service.authorization.check_visibility(input_node)
         return output_node, input_node
 
-    def read_link_manifest(
+    def read_selected_manifest(
         self, unit_uuid: uuid_pkg.UUID
     ) -> tuple[str, UnitDefinition]:
         unit = self.unit_repository.get(Unit(uuid=unit_uuid))
@@ -437,7 +507,7 @@ class UnitIOService:
         return selected_commit, manifest
 
     @staticmethod
-    def get_link_field(
+    def get_manifest_field(
         node: UnitIO,
         section: FieldKey,
         selected_commit: str,
@@ -453,15 +523,15 @@ class UnitIOService:
         self, output_node: UnitIO, input_node: UnitIO
     ) -> UnitIOCompatibilityResult:
         manifests = {
-            unit_uuid: self.read_link_manifest(unit_uuid)
+            unit_uuid: self.read_selected_manifest(unit_uuid)
             for unit_uuid in dict.fromkeys(
                 (output_node.unit_uuid, input_node.unit_uuid)
             )
         }
-        output = self.get_link_field(
+        output = self.get_manifest_field(
             output_node, FieldKey.OUTPUT, *manifests[output_node.unit_uuid]
         )
-        input_field = self.get_link_field(
+        input_field = self.get_manifest_field(
             input_node, FieldKey.INPUT, *manifests[input_node.unit_uuid]
         )
         return UnitIOCompatibility().check_link(output, input_field)

@@ -43,7 +43,7 @@ class UnitIOUpdate(BaseModel):
 
 
 class UnitIOSetState(BaseModel):
-    state: str | None = None
+    state: str
 
 
 @dataclass

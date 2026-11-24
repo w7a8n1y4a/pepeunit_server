@@ -136,7 +136,7 @@ class MqttManager:
             except Exception as e:
                 logging.error(f"MQTT watchdog error: {e}")
 
-    def publish(self, topic: str, msg: dict | str) -> None:
+    def publish(self, topic: str, msg: dict | str | bytes) -> None:
         payload = json.dumps(msg) if isinstance(msg, dict) else msg
 
         if self._loop is None:

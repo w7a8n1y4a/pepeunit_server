@@ -296,7 +296,6 @@ def running_units(unpacked_firmwares, client_emulator, regular_user_token, datab
 
 @pytest.fixture(scope="session")
 def chain_links(running_units, regular_user_token, database, cc):
-    from app.dto.enum import UnitIOTypeEnum
     from app.schemas.pydantic.unit_io import LinkCreate, UnitIOFilter
     from tests.integration.helpers.services import unit_io_service
 
@@ -304,9 +303,8 @@ def chain_links(running_units, regular_user_token, database, cc):
     io_units_list = []
     for unit in running_units.chain():
         _, unit_ios = service.list(UnitIOFilter.unlimited(unit_uuid=unit.uuid))
-        if unit_ios[0].type == UnitIOTypeEnum.OUTPUT:
-            unit_ios = unit_ios[::-1]
-        io_units_list.append(unit_ios)
+        nodes = {unit_io.topic_name: unit_io for unit_io in unit_ios}
+        io_units_list.append([nodes["input_counter"], nodes["output_counter"]])
 
     service.create_link(
         LinkCreate(

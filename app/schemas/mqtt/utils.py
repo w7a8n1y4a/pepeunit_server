@@ -17,7 +17,7 @@ def get_only_reserved_keys(input_dict: dict) -> dict:
     return UnitStateRead(**filtered_dict).dict()
 
 
-def publish_to_topic(topic: str, msg: dict or str) -> None:
+def publish_to_topic(topic: str, msg: dict | str | bytes) -> None:
     try:
         mqtt_manager.publish(topic, msg)
     except MqttError as err:

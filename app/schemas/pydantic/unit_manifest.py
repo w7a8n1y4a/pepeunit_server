@@ -511,7 +511,7 @@ class UnitDefinition(ManifestContractHeader):
     def validate_literal(
         self,
         field: FieldDeclaration,
-        value: JsonValue,
+        value: JsonValue | bytes,
         path: tuple[str | int, ...],
     ) -> None:
         kind = field[FieldKey.TYPE]
@@ -530,10 +530,11 @@ class UnitDefinition(ManifestContractHeader):
             FieldType.STRING: (str,),
             FieldType.OBJECT: (dict,),
             FieldType.ARRAY: (list,),
-            FieldType.BYTES: (),
+            FieldType.ANY: (type(None), bool, int, float, str, dict, list),
+            FieldType.BYTES: (bytes,),
         }
         self.require_field(
-            kind == FieldType.ANY or type(value) in types.get(kind, ()),
+            type(value) in types.get(kind, ()),
             path,
             "Value does not match the declared type",
         )
@@ -578,7 +579,7 @@ class UnitDefinition(ManifestContractHeader):
     def validate_literal_size(
         self,
         field: FieldDeclaration,
-        value: JsonValue,
+        value: JsonValue | bytes,
         path: tuple[str | int, ...],
     ) -> None:
         if isinstance(value, str) and FieldKey.MAX_LENGTH in field:
@@ -587,9 +588,11 @@ class UnitDefinition(ManifestContractHeader):
                 path,
                 "Value exceeds max_length",
             )
-        if FieldKey.MAX_BYTES in field and (
-            field[FieldKey.TYPE] == FieldType.ANY or isinstance(value, str)
-        ):
+        if FieldKey.MAX_BYTES not in field:
+            return
+        if isinstance(value, bytes):
+            size = len(value)
+        elif field[FieldKey.TYPE] == FieldType.ANY or isinstance(value, str):
             try:
                 text = (
                     json.dumps(
@@ -605,16 +608,18 @@ class UnitDefinition(ManifestContractHeader):
             except ValueError, UnicodeEncodeError:
                 self.require_field(False, path, "Value cannot be encoded")
                 return
-            self.require_field(
-                size <= field[FieldKey.MAX_BYTES],
-                path,
-                "Value exceeds max_bytes",
-            )
+        else:
+            return
+        self.require_field(
+            size <= field[FieldKey.MAX_BYTES],
+            path,
+            "Value exceeds max_bytes",
+        )
 
     def validate_nested_literal(
         self,
         field: FieldDeclaration,
-        value: JsonValue,
+        value: JsonValue | bytes,
         path: tuple[str | int, ...],
     ) -> None:
         if field[FieldKey.TYPE] == FieldType.ARRAY:

@@ -40,6 +40,17 @@ async def update(
     return UnitIORead(**(await unit_io_service.update(uuid, data)).dict())
 
 
+@router.post(
+    "/check_input_state/{uuid}", status_code=status.HTTP_204_NO_CONTENT
+)
+def check_input_state(
+    uuid: uuid_pkg.UUID,
+    data: UnitIOSetState,
+    unit_io_service: UnitIOService = Depends(get_unit_io_service),
+) -> None:
+    unit_io_service.check_input_state(uuid, data)
+
+
 @router.patch("/set_state_input/{uuid}", response_model=UnitIORead)
 def set_state_input(
     uuid: uuid_pkg.UUID,

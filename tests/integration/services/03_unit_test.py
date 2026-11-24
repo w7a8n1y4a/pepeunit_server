@@ -5,22 +5,22 @@ import os
 import re
 import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 
 import pytest
-from pepeunit_client.file_manager import FileManager
+from starlette.datastructures import UploadFile
 
 from app import runtime, settings
 from app.configs.clickhouse import get_clickhouse_client
-from app.configs.error_codes import ErrorCode
 from app.configs.errors import (
     CipherError,
     GitRepoError,
     MqttError,
     NoAccessError,
+    ReadmeGenerationError,
     RepoError,
     UnitError,
 )
-from app.configs.rest import get_unit_manifest_service
 from app.dto.agent.abc import AgentBackend
 from app.dto.clickhouse.log import UnitLog
 from app.dto.enum import (
@@ -241,8 +241,8 @@ def test_get_firmware(unpacked_firmwares, compile_unit, regular_user_token, data
     with pytest.raises(UnitError):
         service.get_unit_firmware_tgz(compile_unit.uuid, 9, 13)
 
-    selected_version = service.get_selected_version(compile_unit.uuid)
-    assert selected_version.commit != ""
+    target_version = service.get_target_version(compile_unit.uuid)
+    assert target_version.commit != ""
 
 
 def test_state_storage(universal_auto_unit, regular_user_token, database, cc) -> None:
@@ -269,7 +269,7 @@ def test_hand_update_firmware_unit(
     service = unit_service(database, cc, token)
     target_units = running_units.firmware_manual()
 
-    manual_commits = []
+    target_versions = []
     for unit in target_units:
         logging.info(unit.uuid)
         _read, commits = branch_commits(
@@ -279,14 +279,14 @@ def test_hand_update_firmware_unit(
             only_tag=unit.is_only_tag_update,
             count=2,
         )
-        manual_commit = commits[1].commit
-        manual_commits.append(manual_commit)
-        logging.info(f"{unit.name}, {unit.uuid},{manual_commit}")
-        assert patch_unit_commit(token, unit, manual_commit) < 400
+        target_version = commits[1].commit
+        target_versions.append(target_version)
+        logging.info(f"{unit.name}, {unit.uuid},{target_version}")
+        assert patch_unit_commit(token, unit, target_version) < 400
 
     expected = {
         unit.uuid: version
-        for unit, version in zip(target_units, manual_commits, strict=True)
+        for unit, version in zip(target_units, target_versions, strict=True)
     }
 
     def all_updated() -> bool:
@@ -344,13 +344,11 @@ def test_auto_update_firmware_unit(
     service = unit_service(database, cc, token)
     source, middle, sink = running_units.chain()
     _, commits = branch_commits(database, token, source.repo_uuid)
-    branch_head_commit = commits[0].commit
-    assert patch_unit_commit(token, source, branch_head_commit) < 400
+    target_version = commits[0].commit
+    assert patch_unit_commit(token, source, target_version) < 400
 
     wait_until(
-        lambda: (
-            service.get(source.uuid).current_commit_version == branch_head_commit
-        ),
+        lambda: service.get(source.uuid).current_commit_version == target_version,
         timeout=runtime.get().pu_instance_unit_state_send_interval * 2 + 10,
         message="hand unit update did not reach unit commit",
         session=database,
@@ -368,18 +366,17 @@ def test_auto_update_firmware_unit(
 
     repo_svc = repo_service(database, token)
     repo = repo_svc.read(source.repo_uuid)
-    _, tags = service.git_repo_repository.query_branch_commits(
-        repo, source.target_branch, 0, 1, only_tag=True, search=None
+    commits_with_tag = service.git_repo_repository.get_branch_commits_with_tag(
+        repo, source.target_branch
     )
+    tags = service.git_repo_repository.get_tags_from_all_commits(commits_with_tag)
     tag_commit = tags[0]["commit"]
 
     def bulk_reached() -> bool:
         middle_commit = service.get(middle.uuid).current_commit_version
         sink_commit = service.get(sink.uuid).current_commit_version
-        logging.info(
-            (middle_commit, sink_commit, branch_head_commit, tag_commit)
-        )
-        return middle_commit == branch_head_commit and sink_commit == tag_commit
+        logging.info((middle_commit, sink_commit, target_version, tag_commit))
+        return middle_commit == target_version and sink_commit == tag_commit
 
     wait_until(
         bulk_reached,
@@ -403,16 +400,17 @@ def test_env_update_command(
 
     assert post_unit_command(token, chain_sink_unit, BackendTopicCommand.ENV_UPDATE) < 400
 
-    filepath = f"tmp/test_units/{chain_sink_unit.uuid}/.env"
+    filepath = f"tmp/test_units/{chain_sink_unit.uuid}/env.json"
 
     def env_updated() -> bool:
-        return FileManager.read_env(filepath)["PU_MIN_LOG_LEVEL"] == "Info"
+        with open(filepath) as handle:
+            return json.loads(handle.read())["PU_MIN_LOG_LEVEL"] == "Info"
 
     wait_until(
         env_updated,
         timeout=30,
         interval=2,
-        message=".env was not updated on unit",
+        message="env.json was not updated on unit",
     )
 
 
@@ -587,42 +585,37 @@ def test_download_unit_logs(
     assert response.text == content
 
 
-def test_convert_unit_manifest_to_md(regular_user_token, database) -> None:
-    service = get_unit_manifest_service(database, regular_user_token)
+@pytest.mark.asyncio
+async def test_convert_toml_file_to_md(regular_user_token, database, cc) -> None:
+    service = unit_service(database, cc, regular_user_token)
+
+    def upload(content: bytes, name: str) -> UploadFile:
+        return UploadFile(file=BytesIO(content), filename=name)
+
     tests_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    manifest_path = os.path.join(tests_dir, "data", "unit_manifest", "unit.yml")
-    with open(manifest_path, "rb") as handle:
+    base_toml_dir = os.path.join(tests_dir, "data", "toml")
+
+    toml_path = os.path.join(base_toml_dir, "pepeunit.toml")
+    with open(toml_path, "rb") as handle:
         content = handle.read()
-    md = service.readme(content)
-    assert md.startswith("# room-thermometer\n")
+    md = await service.convert_toml_file_to_md(upload(content, "pepeunit.toml"))
+    assert isinstance(md, str)
+    assert md.strip() != ""
+    assert md.lstrip().startswith("# WiFi Temp Sensor ds18b20")
     assert "Parameter | Implementation" in md
-    assert "## Work algorithm" in md
-    assert "## Environment" in md
-    assert "## Input" in md
-    assert "## Output" in md
-    assert '"reset": {' in md
-    assert '"log": {' in md
-    assert '"base":' not in md
-    assert '"COMMAND"' in md
+    assert "## Files" in md
 
-    maximum = service.MAX_UPLOAD_BYTES
-    with pytest.raises(GitRepoError) as failure:
-        service.readme(b" " * (maximum + 1))
-    assert (
-        failure.value.error_code == ErrorCode.GIT_REPO_UNIT_MANIFEST_TOO_LARGE
-    )
-
-    for bad_content in (
-        b"search: [",
-        content.replace(b"v1", b"v999", 1),
-        content.replace(b"type: sensor", b"type: unknown"),
-    ):
-        with pytest.raises(GitRepoError) as failure:
-            service.readme(bad_content)
-        assert (
-            failure.value.error_code
-            == ErrorCode.GIT_REPO_UNIT_MANIFEST_INVALID
-        )
+    bad_files = [
+        "bad_size_pepeunit.toml",
+        "bad_syntax_pepeunit.toml",
+        "bad_general_items_pepeunit.toml",
+        "bad_general_text_pepeunit.toml",
+    ]
+    for bad_name in bad_files:
+        with open(os.path.join(base_toml_dir, bad_name), "rb") as handle:
+            bad_content = handle.read()
+        with pytest.raises(ReadmeGenerationError):
+            await service.convert_toml_file_to_md(upload(bad_content, bad_name))
 
 
 def test_get_current_schema(

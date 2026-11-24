@@ -55,7 +55,7 @@ class MQTTClient:
         self._thread: threading.Thread | None = None
         self._connected_since: float | None = None
 
-        self.env_file = f"tmp/test_units/{unit.uuid}/.env"
+        self.env_file = f"tmp/test_units/{unit.uuid}/env.json"
         self.schema_file = f"tmp/test_units/{unit.uuid}/schema.json"
         self.log_file = f"tmp/test_units/{unit.uuid}/log.json"
 
@@ -92,7 +92,7 @@ class MQTTClient:
                     msg.topic, SearchTopicType.FULL_NAME, SearchScope.INPUT
                 )
 
-                if topic_name == "input_counter":
+                if topic_name == "input/pepeunit":
                     value = msg.payload
                     try:
                         value = int(value)
@@ -107,7 +107,7 @@ class MQTTClient:
                             ) as f:
                                 json.dump(log_state, f, indent=4)
 
-                            client.publish_to_topics("output_counter", str(value))
+                            client.publish_to_topics("output/pepeunit", str(value))
 
                     except ValueError:
                         pass
@@ -124,7 +124,7 @@ class MQTTClient:
                     current_time - self.client.settings.DELAY_PUB_MSG
                 ) >= self.client.settings.DELAY_PUB_MSG:
                     msg = f"{msg_count // 10}"
-                    self.client.publish_to_topics("output_counter", msg)
+                    self.client.publish_to_topics("output/pepeunit", msg)
                     msg_count += 1
 
                 self._report_state()

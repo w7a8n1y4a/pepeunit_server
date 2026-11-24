@@ -8,7 +8,7 @@ from app.utils.utils import generate_random_string
 from tests.load.src.dto.config import LoadTestConfig
 
 MQTT_TIMEOUT = 10
-OUTPUT_TOPIC = "output_load"
+OUTPUT_TOPIC = "output/pepeunit"
 
 
 class MQTTLoadTest:

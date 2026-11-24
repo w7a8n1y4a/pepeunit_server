@@ -23,12 +23,12 @@ def _status(response: httpx.Response) -> int:
     return response.status_code
 
 
-def patch_unit_commit(token: str, unit, manual_commit: str) -> int:
+def patch_unit_commit(token: str, unit, target_version: str) -> int:
     url = f"{settings.pu_link_prefix_and_v1}/units/{unit.uuid}"
     response = httpx.patch(
         url=url,
         json=UnitUpdate(
-            is_auto_update_unit=False, target_commit=manual_commit
+            is_auto_update_unit=False, target_commit=target_version
         ).dict(),
         headers=_headers(token),
         timeout=runtime.get().http_timeout(),

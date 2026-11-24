@@ -30,8 +30,9 @@ type snapshotUnitIO struct {
 }
 
 type Snapshot struct {
-	unitIOs map[string]snapshotUnitIO
-	links   map[string]map[string]struct{}
+	unitIOs     map[string]snapshotUnitIO
+	links       map[string]map[string]struct{}
+	conversions map[unitPair]affineConversion
 }
 
 func (p *Processor) startSnapshotSync(ctx context.Context) chan<- struct{} {
@@ -82,6 +83,10 @@ func (p *Processor) LoadSnapshot(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	snapshot.conversions, err = loadUnitConversions(ctx, snapshot)
+	if err != nil {
+		return fmt.Errorf("load MessageProcessor UCUM conversions: %w", err)
+	}
 	p.snapshot.Store(snapshot)
 	return nil
 }
@@ -90,25 +95,9 @@ func selectCommits(ctx context.Context, units []database.UnitVersionSelection) (
 	if len(units) == 0 {
 		return nil, nil
 	}
-	body, err := json.Marshal(units)
-	if err != nil {
-		return nil, fmt.Errorf("encode Unit versions: %w", err)
-	}
-
-	cmd := exec.CommandContext(ctx, "python", "-m", "app.services.message_processor_service")
-	cmd.Stdin = bytes.NewReader(body)
-	result, err := cmd.Output()
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
-			return nil, fmt.Errorf("select Unit commits: %w: %s", err, bytes.TrimSpace(exitErr.Stderr))
-		}
-		return nil, fmt.Errorf("select Unit commits: %w", err)
-	}
-
 	var commits map[uuid.UUID]string
-	if err := json.Unmarshal(result, &commits); err != nil {
-		return nil, fmt.Errorf("decode selected commits: %w", err)
+	if err := runPythonJSON(ctx, "app.services.message_processor_service", units, &commits); err != nil {
+		return nil, fmt.Errorf("select Unit commits: %w", err)
 	}
 	if len(commits) != len(units) {
 		return nil, fmt.Errorf("expected %d selected commits, received %d", len(units), len(commits))
@@ -119,6 +108,27 @@ func selectCommits(ctx context.Context, units []database.UnitVersionSelection) (
 		}
 	}
 	return commits, nil
+}
+
+func runPythonJSON(ctx context.Context, module string, input, output any) error {
+	body, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Errorf("encode %s input: %w", module, err)
+	}
+	cmd := exec.CommandContext(ctx, "python", "-m", module)
+	cmd.Stdin = bytes.NewReader(body)
+	result, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+			return fmt.Errorf("run %s: %w: %s", module, err, bytes.TrimSpace(exitErr.Stderr))
+		}
+		return fmt.Errorf("run %s: %w", module, err)
+	}
+	if err := json.Unmarshal(result, output); err != nil {
+		return fmt.Errorf("decode %s output: %w", module, err)
+	}
+	return nil
 }
 
 func buildSnapshot(rows database.ProcessorRows, units map[uuid.UUID]manifestIO) (*Snapshot, error) {

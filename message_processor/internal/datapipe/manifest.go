@@ -218,6 +218,10 @@ func (d *manifestDictionary) resolveField(field ioField, direction string) error
 				return fmt.Errorf("variants require a nonempty mapping and forbid fields and extra")
 			}
 			for name, declarations := range choices {
+				variantFields, _ := declarations.(map[string]any)
+				if _, exists := variantFields[variantAction]; exists {
+					return fmt.Errorf("variant %q: field %q is defined by variants", name, variantAction)
+				}
 				if err := d.resolveObjectFields(declarations); err != nil {
 					return fmt.Errorf("variant %q: %w", name, err)
 				}

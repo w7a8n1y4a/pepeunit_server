@@ -46,6 +46,7 @@ class UnitIO(SQLModel, table=True):
     create_datetime: datetime = Field(nullable=False)
 
     state: str = Field(nullable=True)
+    last_message_error: str | None = Field(default=None, nullable=True)
     last_update_datetime: datetime = Field(nullable=False)
 
     # pipeline user target state

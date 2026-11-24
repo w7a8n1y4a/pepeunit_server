@@ -44,10 +44,13 @@ type Processor struct {
 	alertBuffer   *alerts.Buffer
 	cleanup       *cleanup.NRecordsCleanupService
 	notifications bool
+	publish       publishMessage
 }
 
 // NewProcessor creates a new Processor instance
-func NewProcessor(clickhouseDB *database.ClickHouseDB, postgresDB *database.PostgresDB, cfg *config.Config) *Processor {
+func NewProcessor(
+	clickhouseDB *database.ClickHouseDB, postgresDB *database.PostgresDB, cfg *config.Config, publish publishMessage,
+) *Processor {
 	flushInterval := time.Duration(cfg.BufferFlushInterval) * time.Second
 	bufferFactory := processing_policy.NewBufferFactory(
 		postgresDB,
@@ -70,6 +73,7 @@ func NewProcessor(clickhouseDB *database.ClickHouseDB, postgresDB *database.Post
 		alertBuffer:   alertBuffer,
 		cleanup:       cleanup,
 		notifications: cfg.NotificationEnable,
+		publish:       publish,
 	}
 }
 
@@ -118,7 +122,7 @@ func (p *Processor) ProcessMessage(ctx context.Context, topic string, payload []
 		if domain != p.domain || uuid.Validate(ioUUID) != nil {
 			return apperr.New(apperr.InvalidTopic, "invalid UnitIO topic: %s", topic)
 		}
-		return p.validateMessage(ioUUID, payload)
+		return p.processUnitIOMessage(ctx, ioUUID, payload)
 	}
 
 	// Extract the IO UUID from the topic
@@ -198,21 +202,6 @@ func (p *Processor) ProcessMessage(ctx context.Context, topic string, payload []
 		}
 	}
 
-	return nil
-}
-
-func (p *Processor) validateMessage(ioUUID string, payload []byte) error {
-	snapshot := p.snapshot.Load()
-	if snapshot == nil {
-		return fmt.Errorf("MessageProcessor schemas have not been loaded")
-	}
-	node, exists := snapshot.unitIOs[ioUUID]
-	if !exists {
-		return fmt.Errorf("UnitIO %s has no loaded schema", ioUUID)
-	}
-	if _, err := decodePayload(node.definition, payload); err != nil {
-		return fmt.Errorf("UnitIO %s: %w", ioUUID, err)
-	}
 	return nil
 }
 

@@ -67,6 +67,7 @@ class UnitIORead(BaseModel):
 
     create_datetime: datetime
     state: str | None = None
+    last_message_error: str | None = None
 
     unit_uuid: uuid_pkg.UUID
     creator_uuid: uuid_pkg.UUID

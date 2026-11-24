@@ -1,9 +1,12 @@
+import json
+import sys
 from dataclasses import dataclass
 from fractions import Fraction
 
 from lark import Token, Tree
 from lark.exceptions import VisitError
 from pint.errors import PintError
+from pydantic import TypeAdapter
 from ucumvert import (
     InvalidUcumError,
     PintUcumRegistry,
@@ -102,3 +105,21 @@ class UCUMUnits:
         if scale == 0:
             return None
         return UCUMConversion(scale=scale, offset=offset)
+
+    def write_conversions(self) -> None:
+        pairs = TypeAdapter(list[tuple[str, str]]).validate_json(
+            sys.stdin.buffer.read()
+        )
+        result: list[tuple[str, str] | None] = []
+        for source, target in pairs:
+            conversion = self.conversion(source, target)
+            result.append(
+                (str(conversion.scale), str(conversion.offset))
+                if conversion
+                else None
+            )
+        json.dump(result, sys.stdout)
+
+
+if __name__ == "__main__":
+    UCUMUnits().write_conversions()

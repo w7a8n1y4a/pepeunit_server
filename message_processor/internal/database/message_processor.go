@@ -78,3 +78,9 @@ func processorRows[T any](ctx context.Context, tx pgx.Tx, query string) ([]T, er
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[T])
 }
+
+func (db *PostgresDB) SetLastMessageError(ctx context.Context, ioUUID uuid.UUID, reason string) error {
+	return db.Exec(ctx, `
+		UPDATE units_io SET last_message_error = $2
+		WHERE uuid = $1 AND last_message_error IS DISTINCT FROM $2`, ioUUID, reason)
+}

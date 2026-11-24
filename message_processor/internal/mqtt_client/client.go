@@ -331,6 +331,17 @@ func (c *MQTTClient) subscribe(cm *autopaho.ConnectionManager) error {
 	return nil
 }
 
+func (c *MQTTClient) Publish(ctx context.Context, topic string, payload []byte, qos byte) error {
+	c.connMu.RLock()
+	cm := c.cm
+	c.connMu.RUnlock()
+	if cm == nil {
+		return errors.New("MQTT publisher is unavailable")
+	}
+	_, err := cm.Publish(ctx, &paho.Publish{Topic: topic, Payload: payload, QoS: qos})
+	return err
+}
+
 func (c *MQTTClient) Disconnect() {
 	c.cancel()
 	c.connMu.RLock()

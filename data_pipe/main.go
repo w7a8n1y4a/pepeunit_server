@@ -113,7 +113,7 @@ func main() {
 	}
 	defer mqttClient.Disconnect()
 
-	processor.StartConfigSync(ctx, redisDB, mqttClient)
+	processor.StartConfigSync(ctx, redisDB)
 
 	reloadCtx, requestReload := context.WithCancel(context.Background())
 	defer requestReload()

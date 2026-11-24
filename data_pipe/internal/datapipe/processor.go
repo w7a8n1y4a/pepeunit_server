@@ -17,7 +17,6 @@ import (
 	"data_pipe/internal/datapipe/processing_policy"
 	"data_pipe/internal/datapipe/transformations"
 	"data_pipe/internal/logging"
-	"data_pipe/internal/mqtt_client"
 
 	"github.com/google/uuid"
 )
@@ -74,8 +73,8 @@ func (p *Processor) LoadNodeConfigs(ctx context.Context) error {
 }
 
 // StartConfigSync starts background processes for configuration synchronization
-func (p *Processor) StartConfigSync(ctx context.Context, redisDB *database.RedisDB, mqttClient *mqtt_client.MQTTClient) {
-	p.configs.StartConfigSync(ctx, p.postgresDB, redisDB, mqttClient)
+func (p *Processor) StartConfigSync(ctx context.Context, redisDB *database.RedisDB) {
+	p.configs.StartConfigSync(ctx, p.postgresDB, redisDB)
 }
 
 // Start starts the processor

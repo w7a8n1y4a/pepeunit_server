@@ -406,6 +406,11 @@ class DataPipeStatus(str, enum.Enum):
     ERROR = "Error"
 
 
+class MessageProcessorStream(str, enum.Enum):
+    NAME = "backend_message_processor"
+    RELOAD = "reload"
+
+
 class DataPipeStage(str, enum.Enum):
     """
     Stages data pipeline

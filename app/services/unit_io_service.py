@@ -18,7 +18,7 @@ from app.configs.errors import (
     MqttError,
     UnitIOError,
 )
-from app.configs.redis import DataPipeConfigAction, send_to_data_pipe_stream
+from app.configs.redis import notify_message_processor
 from app.domain.link_model import Link
 from app.domain.repo_model import Repo
 from app.domain.unit_io_model import UnitIO
@@ -253,14 +253,9 @@ class UnitIOService:
             and data.is_data_pipe_active is not None
             and not is_standard_topic
         ):
-            await send_to_data_pipe_stream(
-                DataPipeConfigAction.UPDATE
-                if data.is_data_pipe_active
-                else DataPipeConfigAction.DELETE,
-                unit_io_updated.model_dump(),
-            )
+            await notify_message_processor()
 
-        return self.unit_io_repository.update(uuid, update_unit_io)
+        return unit_io_updated
 
     def check_input_state(
         self,
@@ -700,11 +695,8 @@ class UnitIOService:
         unit_io.data_pipe_yml = json.dumps(
             data_pipe_entity.dict(), default=obj_serializer
         )
-        unit_io = self.unit_io_repository.update(uuid, unit_io)
-
-        await send_to_data_pipe_stream(
-            DataPipeConfigAction.UPDATE, unit_io.model_dump()
-        )
+        self.unit_io_repository.update(uuid, unit_io)
+        await notify_message_processor()
 
     def get_data_pipe_config(self, uuid: uuid_pkg.UUID) -> str:
         if not runtime.get().pu_ff_datapipe_enable:

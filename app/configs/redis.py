@@ -1,16 +1,11 @@
-import enum
-import json
+import logging
 from collections.abc import AsyncIterator
 
 from redis.asyncio import Redis, from_url
+from redis.exceptions import RedisError
 
 from app import runtime, settings
-from app.utils.utils import obj_serializer
-
-
-class DataPipeConfigAction(str, enum.Enum):
-    UPDATE = "Update"
-    DELETE = "Delete"
+from app.dto.enum import MessageProcessorStream
 
 
 async def get_redis_session(
@@ -31,17 +26,12 @@ async def get_redis_session(
     await session.wait_closed()
 
 
-async def send_to_data_pipe_stream(
-    action: DataPipeConfigAction, unit_io: dict
-) -> None:
-    redis = await anext(get_redis_session())
+async def notify_message_processor() -> None:
     try:
-        await redis.xadd(
-            "backend_data_pipe_nodes",
-            {
-                "action": action,
-                "unit_io_data": json.dumps(unit_io, default=obj_serializer),
-            },
-        )
-    finally:
-        await redis.close()
+        async with await anext(get_redis_session()) as redis:
+            await redis.xadd(
+                MessageProcessorStream.NAME.value,
+                {MessageProcessorStream.RELOAD.value: 1},
+            )
+    except RedisError:
+        logging.exception("Failed to notify MessageProcessor")

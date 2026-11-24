@@ -10,11 +10,9 @@ import (
 	"data_pipe/internal/config"
 	"data_pipe/internal/database"
 	"data_pipe/internal/logging"
-	"data_pipe/internal/mqtt_client"
 	"data_pipe/internal/types"
 
 	"github.com/google/uuid"
-	"github.com/redis/go-redis/v9"
 )
 
 type storedNodeConfig struct {
@@ -110,106 +108,70 @@ func (c *DataPipeConfigs) LoadNodeConfigs(ctx context.Context, postgresDB *datab
 	return nil
 }
 
-// StartConfigSync starts background processes for configuration synchronization
-func (c *DataPipeConfigs) StartConfigSync(ctx context.Context, postgresDB *database.PostgresDB, redisDB *database.RedisDB, mqttClient *mqtt_client.MQTTClient) {
-	// Start periodic sync
+const messageProcessorStream = "backend_message_processor"
+
+func (c *DataPipeConfigs) StartConfigSync(ctx context.Context, postgresDB *database.PostgresDB, redisDB *database.RedisDB) {
+	changes := make(chan int)
 	go func() {
-		ticker := time.NewTicker(time.Duration(c.cfg.ConfigSyncInterval) * time.Second)
-		defer ticker.Stop()
-
-		logging.Infof("Success Config Update periodic gorutine start")
-
-		for {
+		defer close(changes)
+		lastID := "$"
+		for ctx.Err() == nil {
+			messages, err := redisDB.ReadStream(ctx, messageProcessorStream, lastID)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				logging.Errorf("Failed to read MessageProcessor reload signals: %v", err)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(time.Second):
+				}
+				continue
+			}
+			if len(messages) == 0 {
+				continue
+			}
+			lastID = messages[len(messages)-1].ID
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
-				logging.Infof("Run gorutine update configs by main timer")
-				if err := c.LoadNodeConfigs(ctx, postgresDB); err != nil {
-					logging.Errorf("Failed to sync configurations by Gorutine: %v", err)
-				}
+			case changes <- len(messages):
 			}
 		}
 	}()
 
-	// Start Redis stream processing
 	go func() {
-		lastID := "$" // Start from the latest message
+		periodic := time.NewTicker(time.Duration(c.cfg.ConfigSyncInterval) * time.Second)
+		defer periodic.Stop()
+		flush := time.NewTicker(time.Duration(c.cfg.BufferFlushInterval) * time.Second)
+		defer flush.Stop()
 
-		// Create a buffer for topics
-		topicBuffer := make([]string, 0)
-		bufferSize := 0
-		stopCh := make(chan struct{})
-
-		// Start timer goroutine
-		go func() {
-			ticker := time.NewTicker(time.Duration(c.cfg.BufferFlushInterval) * time.Second)
-			defer ticker.Stop()
-
-			for {
-				select {
-				case <-ticker.C:
-					if bufferSize > 0 {
-						logging.Infof("Run update configs by Redis buffer timer")
-						if err := c.LoadNodeConfigs(ctx, postgresDB); err != nil {
-							logging.Errorf("Failed to update configurations: %v", err)
-						}
-						topicBuffer = make([]string, 0)
-						bufferSize = 0
-					}
-				case <-stopCh:
-					return
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-
+		pending := 0
 		for {
 			select {
 			case <-ctx.Done():
-				close(stopCh)
-				logging.Infof("Redis stream processing goroutine received context cancellation")
 				return
-			default:
-				messages, err := redisDB.ReadStream(ctx, "backend_data_pipe_nodes", lastID)
-				if err != nil {
-					if err != redis.Nil {
-						logging.Errorf("Error reading from Redis stream: %v", err)
-					}
+			case count, ok := <-changes:
+				if !ok {
+					return
+				}
+				pending += count
+				if pending < c.cfg.BufferMaxSize {
 					continue
 				}
-
-				// Process messages
-				for _, message := range messages {
-					lastID = message.ID
-					values := message.Values
-
-					if unitIOData, ok := values["unit_io_data"].(string); ok {
-						var nodeData map[string]interface{}
-						if err := json.Unmarshal([]byte(unitIOData), &nodeData); err != nil {
-							logging.Errorf("Error parsing unit_io_data JSON: %v", err)
-							continue
-						}
-
-						if topic, ok := nodeData["topic_name"].(string); ok {
-							// Add topic to buffer
-							topicBuffer = append(topicBuffer, topic)
-							bufferSize++
-
-							// Check if we need to flush based on buffer size
-							if bufferSize >= c.cfg.BufferMaxSize {
-								logging.Infof("Run update configs by Redis buffer size")
-								if err := c.LoadNodeConfigs(ctx, postgresDB); err != nil {
-									logging.Errorf("Failed to update configurations: %v", err)
-								}
-								topicBuffer = make([]string, 0)
-								bufferSize = 0
-							}
-						}
-					}
+			case <-flush.C:
+				if pending == 0 {
+					continue
 				}
+			case <-periodic.C:
 			}
+
+			if err := c.LoadNodeConfigs(ctx, postgresDB); err != nil {
+				logging.Errorf("Failed to reload configurations: %v", err)
+				continue
+			}
+			pending = 0
 		}
 	}()
 }

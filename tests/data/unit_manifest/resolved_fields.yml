@@ -34,7 +34,7 @@ input:
     example: {action: pulse, duration: 500}
 
 output:
-  button: {type: string, codec: utf8, qos: 0}
+  button: {type: string, qos: 0}
   packet: {type: bytes, max_bytes: 220}
   samples:
     type: array

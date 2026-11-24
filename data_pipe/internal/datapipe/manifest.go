@@ -251,9 +251,13 @@ func (d *manifestDictionary) resolveTransport(field ioField, kind, direction str
 		}
 		return nil
 	}
-	defaultCodec := d.Defaults["codec"]
-	if kind == "bytes" {
-		defaultCodec = "raw"
+	codecs, ok := d.Defaults["codec"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("dictionary defaults.codec must map types to codecs")
+	}
+	defaultCodec, exists := codecs[kind]
+	if !exists || (kind == "string" && field["nullable"] == true) {
+		defaultCodec = codecs["default"]
 	}
 	setFieldDefault(field, "codec", defaultCodec)
 	setFieldDefault(field, "qos", d.Defaults["qos"])

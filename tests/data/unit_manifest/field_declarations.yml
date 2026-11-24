@@ -22,7 +22,6 @@ input:
     example: 2d98b4ba-c935-4379-8e1a-520e76018c17
   button:
     type: string
-    codec: utf8
     enum: [Left, Right]
     max_bytes: 5
     qos: 0

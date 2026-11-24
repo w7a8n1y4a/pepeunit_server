@@ -172,7 +172,10 @@ output:
         create_datetime: {type: string, max_bytes: 64, optional: true}
 
 defaults:
-  codec: json
+  codec:
+    default: json
+    string: utf8
+    bytes: raw
   optional: false
   nullable: false
   extra: false

@@ -160,12 +160,12 @@ class UnitDefinition(ManifestContractHeader):
                 FieldKey.EXTRA, dictionary.defaults[FieldKey.EXTRA]
             )
         if section in (FieldKey.INPUT, FieldKey.OUTPUT):
-            field.setdefault(
-                FieldKey.CODEC,
-                PayloadCodec.RAW
-                if field.get(FieldKey.TYPE) == FieldType.BYTES
-                else dictionary.defaults[FieldKey.CODEC],
-            )
+            kind = field.get(FieldKey.TYPE, "")
+            codecs = dictionary.defaults[FieldKey.CODEC]
+            codec = codecs.get(kind, codecs[FieldKey.DEFAULT])
+            if kind == FieldType.STRING and field[FieldKey.NULLABLE]:
+                codec = codecs[FieldKey.DEFAULT]
+            field.setdefault(FieldKey.CODEC, codec)
             field.setdefault(FieldKey.QOS, dictionary.defaults[FieldKey.QOS])
         if section == FieldKey.OUTPUT:
             field.setdefault(
@@ -693,7 +693,7 @@ class MeasurementStandard(BaseModel):
 
 
 class ManifestDefaults(TypedDict):
-    codec: str
+    codec: dict[str, str]
     optional: bool
     nullable: bool
     extra: bool

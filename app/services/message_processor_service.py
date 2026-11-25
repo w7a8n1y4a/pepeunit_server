@@ -1,3 +1,4 @@
+import argparse
 import json
 import sys
 
@@ -8,7 +9,13 @@ from app.configs.errors import GitRepoError
 from app.domain.repo_model import Repo
 from app.domain.unit_model import Unit
 from app.repositories.git_repo_repository import GitRepoRepository
-from app.schemas.pydantic.message_processor import UnitVersionSelection
+from app.repositories.unit_manifest_repository import UnitManifestRepository
+from app.schemas.pydantic.message_processor import (
+    SnapshotManifestSource,
+    UnitVersionSelection,
+)
+from app.schemas.pydantic.unit_manifest import FieldDeclarations
+from app.services.unit_manifest_service import UnitManifestService
 
 
 class MessageProcessorService:
@@ -52,15 +59,43 @@ class MessageProcessorService:
             selected[str(unit.unit_uuid)] = commits[version]
         return selected
 
-    def run(self) -> None:
-        try:
-            units = TypeAdapter(list[UnitVersionSelection]).validate_json(
-                sys.stdin.buffer.read()
+    def resolve_manifests(
+        self, sources: list[SnapshotManifestSource]
+    ) -> list[dict[str, FieldDeclarations]]:
+        service = UnitManifestService(UnitManifestRepository())
+        manifests = []
+        for source in sources:
+            try:
+                manifest, _ = service.parse_repo_manifest(source.content)
+            except GitRepoError as error:
+                message = (
+                    f"Repo {source.repo_uuid} at {source.commit}: {error}"
+                )
+                raise ValueError(message) from error
+            manifests.append(
+                {"input": manifest.input, "output": manifest.output}
             )
-            selected_commits = self.select_commits(units)
+        return manifests
+
+    def run(self) -> None:
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--manifests", action="store_true")
+        options = parser.parse_args()
+        body = sys.stdin.buffer.read()
+        try:
+            if options.manifests:
+                sources = TypeAdapter(
+                    list[SnapshotManifestSource]
+                ).validate_json(body)
+                result = self.resolve_manifests(sources)
+            else:
+                units = TypeAdapter(list[UnitVersionSelection]).validate_json(
+                    body
+                )
+                result = self.select_commits(units)
         except ValueError as error:
             raise SystemExit(str(error)) from error
-        json.dump(selected_commits, sys.stdout)
+        json.dump(result, sys.stdout, allow_nan=False)
 
 
 if __name__ == "__main__":

@@ -184,29 +184,38 @@ class UnitDefinition(ManifestContractHeader):
 
     def validate_fields(self, dictionary: ManifestDictionary) -> None:
         for section in (FieldKey.ENV, FieldKey.INPUT, FieldKey.OUTPUT):
-            name_pattern = (
-                dictionary.name_patterns.env
-                if section == FieldKey.ENV
-                else dictionary.name_patterns.io
+            self.validate_declarations(
+                section, getattr(self, section), dictionary
             )
-            for name, declaration in getattr(self, section).items():
-                self.require_field(
-                    name_pattern.fullmatch(name) is not None,
-                    (section, name),
-                    f"Name must match {name_pattern.pattern}",
-                )
-                if section == FieldKey.ENV:
-                    try:
-                        json.dumps(declaration, ensure_ascii=False).encode(
-                            "utf-8"
-                        )
-                    except UnicodeEncodeError:
-                        self.require_field(
-                            False,
-                            (section, name),
-                            "Environment schema must be UTF-8",
-                        )
-                self.validate_field(declaration, dictionary, (section, name))
+        self.validate_declarations(FieldKey.ENV, dictionary.env, dictionary)
+
+    def validate_declarations(
+        self,
+        section: FieldKey,
+        declarations: FieldDeclarations,
+        dictionary: ManifestDictionary,
+    ) -> None:
+        name_pattern = (
+            dictionary.name_patterns.env
+            if section == FieldKey.ENV
+            else dictionary.name_patterns.io
+        )
+        for name, declaration in declarations.items():
+            path = (section, name)
+            self.require_field(
+                name_pattern.fullmatch(name) is not None,
+                path,
+                f"Name must match {name_pattern.pattern}",
+            )
+            if section == FieldKey.ENV:
+                try:
+                    json.dumps(declaration, ensure_ascii=False).encode("utf-8")
+                except UnicodeEncodeError:
+                    self.require_field(
+                        False, path, "Environment schema must be UTF-8"
+                    )
+                self.apply_field_defaults(declaration, dictionary, section)
+            self.validate_field(declaration, dictionary, path)
 
     def validate_field(
         self,
@@ -571,10 +580,22 @@ class UnitDefinition(ManifestContractHeader):
             )
         self.validate_literal_size(field, value, path)
         if field.get(FieldKey.FORMAT) == FieldFormat.UUID:
-            try:
-                uuid_pkg.UUID(value)
-            except ValueError:
-                self.require_field(False, path, "Value must be a UUID")
+            self.require_field(
+                self.is_uuid_literal(value), path, "Value must be a UUID"
+            )
+
+    @staticmethod
+    def is_uuid_literal(value: str) -> bool:
+        try:
+            parsed = uuid_pkg.UUID(value.lower())
+        except ValueError:
+            return False
+        return value.lower() in UnitDefinition.uuid_literals(parsed)
+
+    @staticmethod
+    def uuid_literals(value: uuid_pkg.UUID) -> tuple[str, str, str, str]:
+        canonical = str(value)
+        return canonical, value.hex, value.urn, f"{{{canonical}}}"
 
     def validate_literal_size(
         self,

@@ -1,4 +1,6 @@
+from calendar import monthrange
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from app import runtime
 from app.configs.error_codes import ErrorCode
@@ -8,9 +10,14 @@ from app.repositories.instance_resources_repository import (
     InstanceResourcesRepository,
 )
 from app.repositories.logporter_repository import LogporterRepository
-from app.schemas.pydantic.instance_resources import InstanceResourceSample
+from app.schemas.pydantic.instance_resources import (
+    InstanceNetworkTrafficRead,
+    InstanceResourceSample,
+)
 from app.services.access_service import AccessService
-from app.services.notification_service import NotificationService
+
+if TYPE_CHECKING:
+    from app.services.notification_service import NotificationService
 
 
 class InstanceResourcesService:
@@ -77,3 +84,48 @@ class InstanceResourcesService:
         start = max(start, now - self.RETENTION)
         end = min(end, now)
         return self.repository.list_samples(start, end) if start < end else []
+
+    def network_traffic(self) -> InstanceNetworkTrafficRead:
+        self.access_service.authorization.check_access(
+            [AgentType.USER], [UserRole.OWNER]
+        )
+        instance = runtime.get()
+        now = datetime.now(UTC).replace(second=0, microsecond=0)
+        start, end = self.traffic_period(
+            now, instance.pu_instance_network_traffic_reset_day
+        )
+        sample_count, estimated_bytes = self.repository.network_traffic(
+            start, now
+        )
+        limit = instance.pu_instance_network_monthly_traffic_limit
+        return InstanceNetworkTrafficRead(
+            period_start=start,
+            period_end=end,
+            sampled_minutes=sample_count,
+            elapsed_minutes=int((now - start).total_seconds())
+            // InstanceResourceSample.INTERVAL_SECONDS,
+            estimated_bytes=estimated_bytes,
+            limit_bytes=limit,
+            limit_percent=100 * estimated_bytes / limit,
+        )
+
+    @classmethod
+    def traffic_period(
+        cls, now: datetime, reset_day: int
+    ) -> tuple[datetime, datetime]:
+        month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        current = cls.traffic_boundary(month, reset_day)
+        if now < current:
+            previous = (month - timedelta(days=1)).replace(day=1)
+            return cls.traffic_boundary(previous, reset_day), current
+
+        next_month = month + timedelta(
+            days=monthrange(month.year, month.month)[1]
+        )
+        return current, cls.traffic_boundary(next_month, reset_day)
+
+    @staticmethod
+    def traffic_boundary(month: datetime, reset_day: int) -> datetime:
+        return month.replace(
+            day=min(reset_day, monthrange(month.year, month.month)[1])
+        )

@@ -30,6 +30,7 @@ type snapshotUnitIO struct {
 }
 
 type Snapshot struct {
+	manifests       map[manifestVersion]manifestIO
 	unitIOs         map[string]snapshotUnitIO
 	links           map[string]map[string]struct{}
 	conversions     map[unitPair]affineConversion
@@ -73,23 +74,12 @@ func (p *Processor) LoadSnapshot(ctx context.Context) error {
 		return err
 	}
 
-	manifests := make(map[manifestVersion]manifestIO)
-	dictionaries := make(map[string]*manifestDictionary)
-	units := make(map[uuid.UUID]manifestIO, len(rows.Units))
-	for _, unit := range rows.Units {
-		version := manifestVersion{repoUUID: unit.RepoUUID, commit: commits[unit.UnitUUID]}
-		definitions, exists := manifests[version]
-		if !exists {
-			definitions, err = loadManifestIO(ctx, p.repoCachePath, version, dictionaries)
-			if err != nil {
-				return fmt.Errorf("Unit %s, repo %s at %s: %w", unit.UnitUUID, unit.RepoUUID, version.commit, err)
-			}
-			manifests[version] = definitions
-		}
-		units[unit.UnitUUID] = definitions
+	manifests, err := p.loadManifests(ctx, rows.Units, commits)
+	if err != nil {
+		return err
 	}
 
-	snapshot, err := buildSnapshot(rows, units)
+	snapshot, err := buildSnapshot(rows, commits, manifests)
 	if err != nil {
 		return err
 	}
@@ -97,9 +87,57 @@ func (p *Processor) LoadSnapshot(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("load MessageProcessor UCUM conversions: %w", err)
 	}
-	snapshot.selectedCommits = commits
 	p.snapshot.Store(snapshot)
 	return nil
+}
+
+func (p *Processor) loadManifests(
+	ctx context.Context, units []database.UnitVersionSelection, commits map[uuid.UUID]string,
+) (map[manifestVersion]manifestIO, error) {
+	var cached map[manifestVersion]manifestIO
+	if previous := p.snapshot.Load(); previous != nil {
+		cached = previous.manifests
+	}
+
+	manifests := make(map[manifestVersion]manifestIO)
+	var sources []manifestSource
+	for _, unit := range units {
+		version := manifestVersion{repoUUID: unit.RepoUUID, commit: commits[unit.UnitUUID]}
+		if _, exists := manifests[version]; exists {
+			continue
+		}
+		if definition, exists := cached[version]; exists {
+			manifests[version] = definition
+			continue
+		}
+		content, err := readGitManifest(ctx, p.repoCachePath, version)
+		if err != nil {
+			return nil, fmt.Errorf("Unit %s, repo %s at %s: %w", unit.UnitUUID, version.repoUUID, version.commit, err)
+		}
+		manifests[version] = manifestIO{}
+		sources = append(sources, manifestSource{RepoUUID: version.repoUUID, Commit: version.commit, Content: content})
+	}
+	if len(sources) == 0 {
+		return manifests, nil
+	}
+
+	var raw []json.RawMessage
+	if err := runPythonJSON(ctx, "app.services.message_processor_service", sources, &raw, "--manifests"); err != nil {
+		return nil, fmt.Errorf("validate Unit manifests: %w", err)
+	}
+	if len(raw) != len(sources) {
+		return nil, fmt.Errorf("expected %d validated manifests, received %d", len(sources), len(raw))
+	}
+
+	for index, manifest := range raw {
+		source := sources[index]
+		var definition manifestIO
+		if err := decodeJSON(manifest, &definition); err != nil {
+			return nil, fmt.Errorf("decode manifest for repo %s at %s: %w", source.RepoUUID, source.Commit, err)
+		}
+		manifests[manifestVersion{repoUUID: source.RepoUUID, commit: source.Commit}] = definition
+	}
+	return manifests, nil
 }
 
 func selectCommits(ctx context.Context, units []database.UnitVersionSelection) (map[uuid.UUID]string, error) {
@@ -121,12 +159,12 @@ func selectCommits(ctx context.Context, units []database.UnitVersionSelection) (
 	return commits, nil
 }
 
-func runPythonJSON(ctx context.Context, module string, input, output any) error {
+func runPythonJSON(ctx context.Context, module string, input, output any, args ...string) error {
 	body, err := json.Marshal(input)
 	if err != nil {
 		return fmt.Errorf("encode %s input: %w", module, err)
 	}
-	cmd := exec.CommandContext(ctx, "python", "-m", module)
+	cmd := exec.CommandContext(ctx, "python", append([]string{"-m", module}, args...)...)
 	cmd.Stdin = bytes.NewReader(body)
 	result, err := cmd.Output()
 	if err != nil {
@@ -142,10 +180,23 @@ func runPythonJSON(ctx context.Context, module string, input, output any) error 
 	return nil
 }
 
-func buildSnapshot(rows database.ProcessorRows, units map[uuid.UUID]manifestIO) (*Snapshot, error) {
+func buildSnapshot(
+	rows database.ProcessorRows, commits map[uuid.UUID]string, manifests map[manifestVersion]manifestIO,
+) (*Snapshot, error) {
+	units := make(map[uuid.UUID]manifestIO, len(rows.Units))
+	for _, unit := range rows.Units {
+		version := manifestVersion{repoUUID: unit.RepoUUID, commit: commits[unit.UnitUUID]}
+		definition, exists := manifests[version]
+		if !exists {
+			return nil, fmt.Errorf("Unit %s has no validated manifest", unit.UnitUUID)
+		}
+		units[unit.UnitUUID] = definition
+	}
 	snapshot := &Snapshot{
-		unitIOs: make(map[string]snapshotUnitIO, len(rows.UnitIOs)),
-		links:   make(map[string]map[string]struct{}),
+		manifests:       manifests,
+		unitIOs:         make(map[string]snapshotUnitIO, len(rows.UnitIOs)),
+		links:           make(map[string]map[string]struct{}),
+		selectedCommits: commits,
 	}
 	counts := make(map[uuid.UUID]int, len(units))
 	for _, node := range rows.UnitIOs {
@@ -153,9 +204,9 @@ func buildSnapshot(rows database.ProcessorRows, units map[uuid.UUID]manifestIO) 
 		var definition ioField
 		switch node.Direction {
 		case inputDirection:
-			definition = definitions.input[node.TopicName]
+			definition = definitions.Input[node.TopicName]
 		case outputDirection:
-			definition = definitions.output[node.TopicName]
+			definition = definitions.Output[node.TopicName]
 		}
 		if definition == nil {
 			return nil, fmt.Errorf("Unit %s has no schema for %s %q (%s)", node.UnitUUID, node.Direction, node.TopicName, node.UUID)
@@ -164,7 +215,7 @@ func buildSnapshot(rows database.ProcessorRows, units map[uuid.UUID]manifestIO) 
 		counts[node.UnitUUID]++
 	}
 	for unitUUID, definitions := range units {
-		if counts[unitUUID] != len(definitions.input)+len(definitions.output) {
+		if counts[unitUUID] != len(definitions.Input)+len(definitions.Output) {
 			return nil, fmt.Errorf("incomplete IO set for Unit %s", unitUUID)
 		}
 	}

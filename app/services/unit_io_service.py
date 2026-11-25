@@ -648,10 +648,7 @@ class UnitIOService:
             [AgentType.BOT, AgentType.USER, AgentType.UNIT, AgentType.BACKEND]
         )
 
-    def read_data_pipe_field(self, uuid: uuid_pkg.UUID) -> FieldDeclaration:
-        unit_io = self.unit_io_repository.get(UnitIO(uuid=uuid))
-        is_valid_object(unit_io, NotFoundEntity.UNIT_IO)
-        self.access_service.authorization.check_visibility(unit_io)
+    def read_data_pipe_field(self, unit_io: UnitIO) -> FieldDeclaration:
         section = (
             FieldKey.INPUT
             if unit_io.type == UnitIOTypeEnum.INPUT
@@ -665,14 +662,18 @@ class UnitIOService:
         self, uuid: uuid_pkg.UUID
     ) -> DataPipeConfigOptionsRead:
         self.check_data_pipe_preview_access()
-        field = self.read_data_pipe_field(uuid)
+        field = self.read_data_pipe_field(self.get(uuid))
         return DataPipeConfig.options_for_unit_io(field)
 
     async def check_data_pipe_config(
         self, data_pipe: UploadFile, *, uuid: uuid_pkg.UUID | None = None
     ) -> list[DataPipeValidationErrorRead]:
         self.check_data_pipe_preview_access()
-        field = self.read_data_pipe_field(uuid) if uuid is not None else None
+        field = (
+            self.read_data_pipe_field(self.get(uuid))
+            if uuid is not None
+            else None
+        )
         data_pipe_dict = await yml_file_to_dict(data_pipe)
         return is_valid_data_pipe_config(data_pipe_dict, unit_io_field=field)
 
@@ -695,8 +696,9 @@ class UnitIOService:
         self.is_valid_active_data_pipe(unit_io)
 
         data_pipe_dict = await yml_file_to_dict(data_pipe)
+        field = self.read_data_pipe_field(unit_io)
         data_pipe_entity = is_valid_data_pipe_config(
-            data_pipe_dict, is_business_validator=True
+            data_pipe_dict, is_business_validator=True, unit_io_field=field
         )
 
         unit_io.data_pipe_yml = json.dumps(

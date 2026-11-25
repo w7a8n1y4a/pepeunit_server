@@ -107,7 +107,7 @@ func (snapshot *Snapshot) convertNumber(value any, source, target ioField, from,
 	if err != nil {
 		return "", err
 	}
-	if err := snapshot.convertUnits(number, numericUnitPair(source, target, from == "bool")); err != nil {
+	if err := snapshot.convertUnits(number, numericUnitPair(source, target)); err != nil {
 		return "", err
 	}
 	if to == "int" {

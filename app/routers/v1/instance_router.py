@@ -7,7 +7,10 @@ from app.configs.rest import (
     get_peer_service,
 )
 from app.schemas.pydantic.instance import CurrentInstanceSchemaV1
-from app.schemas.pydantic.instance_resources import InstanceResourceSample
+from app.schemas.pydantic.instance_resources import (
+    InstanceNetworkTrafficRead,
+    InstanceResourceSample,
+)
 from app.schemas.pydantic.instance_settings import (
     InstanceSettingsRead,
     InstanceSettingsUpdate,
@@ -47,6 +50,17 @@ def get_instance_resources(
     ),
 ) -> list[InstanceResourceSample]:
     return service.history(start_datetime, end_datetime)
+
+
+@router.get(
+    "/resources/network_traffic", response_model=InstanceNetworkTrafficRead
+)
+def get_instance_network_traffic(
+    service: InstanceResourcesService = Depends(
+        get_instance_resources_service
+    ),
+) -> InstanceNetworkTrafficRead:
+    return service.network_traffic()
 
 
 @router.post("/reboot", status_code=status.HTTP_204_NO_CONTENT)

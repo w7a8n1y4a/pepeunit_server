@@ -29,14 +29,15 @@ type resourceBatch struct {
 }
 
 type resourceBuffer struct {
-	db       *database.ClickHouseDB
-	interval time.Duration
-	maxSize  int
-	mu       sync.Mutex
-	pending  map[resourceWindowKey]database.UnitIOResourceWindow
-	ready    chan struct{}
-	done     chan struct{}
-	cancel   context.CancelFunc
+	db         *database.ClickHouseDB
+	interval   time.Duration
+	maxSize    int
+	mu         sync.Mutex
+	pending    map[resourceWindowKey]database.UnitIOResourceWindow
+	increments int
+	ready      chan struct{}
+	done       chan struct{}
+	cancel     context.CancelFunc
 }
 
 func newResourceBuffer(db *database.ClickHouseDB, interval time.Duration, maxSize int) *resourceBuffer {
@@ -53,20 +54,19 @@ func newResourceBuffer(db *database.ClickHouseDB, interval time.Duration, maxSiz
 func (b *resourceBuffer) add(at time.Time, increment database.UnitIOResourceWindow) {
 	key := resourceWindowKey{unitIOUUID: increment.UnitIOUUID, start: at.UTC().Truncate(time.Hour)}
 	b.mu.Lock()
-	window, exists := b.pending[key]
+	window := b.pending[key]
 	window.UnitIOUUID, window.Start = key.unitIOUUID, key.start
 	window.Requests += increment.Requests
 	window.Bytes += increment.Bytes
 	window.DataPipeBytes += increment.DataPipeBytes
 	b.pending[key] = window
-	if !exists {
-		b.signalIfFull()
-	}
+	b.increments++
+	b.signalIfFull()
 	b.mu.Unlock()
 }
 
 func (b *resourceBuffer) signalIfFull() {
-	if len(b.pending) >= b.maxSize {
+	if b.increments >= b.maxSize {
 		select {
 		case b.ready <- struct{}{}:
 		default:
@@ -119,6 +119,7 @@ func (b *resourceBuffer) flush(ctx context.Context, batch *resourceBatch) bool {
 			return true
 		}
 		b.pending = make(map[resourceWindowKey]database.UnitIOResourceWindow)
+		b.increments = 0
 		b.mu.Unlock()
 		batch.token = uuid.New()
 		batch.windows = slices.Collect(maps.Values(pending))

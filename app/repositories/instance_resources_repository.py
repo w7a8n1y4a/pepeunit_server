@@ -46,3 +46,23 @@ class InstanceResourcesRepository:
             {"start": ceil(start.timestamp()), "end": ceil(end.timestamp())},
             InstanceResourceSample,
         )
+
+    def network_traffic(
+        self, start: datetime, end: datetime
+    ) -> tuple[int, int]:
+        [(sampled_minutes, estimated_bytes)] = self.client.execute(
+            """
+            SELECT count(),
+                sum(network_width_percent * pu_instance_network_speed_limit
+                    * %(seconds)s / 100)
+            FROM instance_resources_samples FINAL
+            WHERE create_datetime > toDateTime(%(start)s, 'UTC')
+                AND create_datetime <= toDateTime(%(end)s, 'UTC')
+            """,
+            {
+                "start": int(start.timestamp()),
+                "end": int(end.timestamp()),
+                "seconds": InstanceResourceSample.INTERVAL_SECONDS,
+            },
+        )
+        return sampled_minutes, round(estimated_bytes)

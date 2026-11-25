@@ -475,12 +475,13 @@ class UnitService:
                 self.git_repo_repository.checkout_firmware_sources(
                     repo, selected_commit, firmware
                 )
-            env_path = firmware / StaticRepoFileName.ENV
-            if env_path.is_dir() and not env_path.is_symlink():
-                shutil.rmtree(env_path)
-            else:
-                env_path.unlink(missing_ok=True)
-            env_path.write_text(
+            for name in (StaticRepoFileName.ENV, StaticRepoFileName.IO_TOPICS):
+                path = firmware / name
+                if path.is_dir() and not path.is_symlink():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink(missing_ok=True)
+            (firmware / StaticRepoFileName.ENV).write_text(
                 UnitEnvSerializer.serialize(env_dict),
                 encoding="utf-8",
                 newline="\n",

@@ -68,7 +68,7 @@ func collectUnitPairs(source, target ioField, pairs map[unitPair]struct{}) {
 		if !dynamic && from != "bool" && !isNumeric(from) {
 			return
 		}
-		pair := numericUnitPair(source, target, dynamic || from == "bool")
+		pair := numericUnitPair(source, target)
 		if pair[0] != "" && pair[1] != "" {
 			pairs[pair] = struct{}{}
 		}
@@ -108,10 +108,11 @@ func collectFieldUnitPairs(source, target map[string]any, pairs map[unitPair]str
 	}
 }
 
-func numericUnitPair(source, target ioField, useTargetUnit bool) unitPair {
+func numericUnitPair(source, target ioField) unitPair {
 	from, _ := source["unit"].(string)
 	to, _ := target["unit"].(string)
-	if useTargetUnit {
+	switch fieldKind(source) {
+	case "", "any", "bool":
 		from = to
 	}
 	return unitPair{from, to}

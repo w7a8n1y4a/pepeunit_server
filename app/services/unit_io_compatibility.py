@@ -324,6 +324,8 @@ class UnitIOCompatibility:
             return UnitIOCompatibilityIssue.NULLABLE
         if target in self.NUMERIC_TYPES:
             return self.check_range(output, input_field, source, target)
+        if target == FieldType.BOOL:
+            return self.check_bool_enum(output, input_field, source)
         if (
             source == target == FieldType.STRING
             and FieldKey.ENUM in input_field
@@ -338,6 +340,39 @@ class UnitIOCompatibility:
         ):
             return UnitIOCompatibilityIssue.ENUM
         return None
+
+    def check_bool_enum(
+        self,
+        output: FieldDeclaration,
+        input_field: FieldDeclaration,
+        source: FieldType,
+    ) -> UnitIOCompatibilityIssue | None:
+        if FieldKey.ENUM not in input_field:
+            return None
+        if self.bool_values(output, source).issubset(
+            input_field[FieldKey.ENUM]
+        ):
+            return None
+        return UnitIOCompatibilityIssue.ENUM
+
+    def bool_values(
+        self, output: FieldDeclaration, source: FieldType
+    ) -> set[bool]:
+        if FieldKey.ENUM in output:
+            return {
+                bool(value)
+                for value in output[FieldKey.ENUM]
+                if value is not None
+            }
+        if source == FieldType.BOOL:
+            return {False, True}
+        low, high = self.output_bounds(output, source)
+        values = set()
+        if low <= 0 <= high:
+            values.add(False)
+        if low != 0 or high != 0:
+            values.add(True)
+        return values
 
     def check_range(
         self,
@@ -368,7 +403,51 @@ class UnitIOCompatibility:
             or upper > self.as_fraction(input_field[FieldKey.MAX])
         ):
             return UnitIOCompatibilityIssue.RANGE
+        if FieldKey.ENUM in input_field and not self.numeric_enum_covers(
+            output, input_field, source, target, conversion, lower, upper
+        ):
+            return UnitIOCompatibilityIssue.ENUM
         return None
+
+    def numeric_enum_covers(
+        self,
+        output: FieldDeclaration,
+        input_field: FieldDeclaration,
+        source: FieldType,
+        target: FieldType,
+        conversion: UCUMConversion,
+        lower: Fraction | int,
+        upper: Fraction | int,
+    ) -> bool:
+        allowed = {
+            self.as_fraction(value)
+            for value in input_field[FieldKey.ENUM]
+            if value is not None
+        }
+        if FieldKey.ENUM in output:
+            return all(
+                self.convert_bound(self.as_fraction(value), conversion, target)
+                in allowed
+                for value in output[FieldKey.ENUM]
+                if value is not None
+            )
+        if source == FieldType.BOOL:
+            return lower in allowed and upper in allowed
+        if lower == upper:
+            return lower in allowed
+        if target == FieldType.INT:
+            covered = sum(lower <= value <= upper for value in allowed)
+            if covered == upper - lower + 1:
+                return True
+        if source == FieldType.INT:
+            start, end = output[FieldKey.MIN], output[FieldKey.MAX]
+            if end - start + 1 <= len(allowed):
+                return all(
+                    self.convert_bound(Fraction(value), conversion, target)
+                    in allowed
+                    for value in range(start, end + 1)
+                )
+        return False
 
     def numeric_conversion(
         self,

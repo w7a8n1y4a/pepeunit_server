@@ -1,3 +1,4 @@
+import uuid as uuid_pkg
 from math import ceil, floor
 
 from pydantic import JsonValue
@@ -6,14 +7,13 @@ from app.dto.enum import FieldFormat, FieldKey, FieldType
 from app.schemas.pydantic.unit_manifest import (
     FieldDeclaration,
     FieldDeclarations,
+    UnitDefinition,
 )
 from app.services.float_json_size import FloatJsonSize
 from app.services.unit_env_serializer import UnitEnvSerializer
 
 
 class UnitEnvSize:
-    UUID_MIN_LENGTH = 32
-
     @classmethod
     def calculate(cls, fields: FieldDeclarations) -> dict[str, int | None]:
         return {name: cls.value_size(field) for name, field in fields.items()}
@@ -85,13 +85,15 @@ class UnitEnvSize:
     ) -> int | None:
         limit = field[FieldKey.MAX_LENGTH]
         if field.get(FieldKey.FORMAT) == FieldFormat.UUID:
-            if limit < cls.UUID_MIN_LENGTH:
-                return None
-            sample = "\v" * (cls.UUID_MIN_LENGTH - 1) + "0"
-            return (
-                cls.literal_size(sample, nested=nested)
-                + limit
-                - cls.UUID_MIN_LENGTH
+            return max(
+                (
+                    cls.literal_size(value, nested=nested)
+                    for value in UnitDefinition.uuid_literals(
+                        uuid_pkg.UUID(int=0)
+                    )
+                    if len(value) <= limit
+                ),
+                default=None,
             )
         if limit == 0:
             return cls.literal_size("", nested=nested)

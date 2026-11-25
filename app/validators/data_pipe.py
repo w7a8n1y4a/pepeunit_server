@@ -476,8 +476,15 @@ def is_valid_data_pipe_config(
                 first, ErrorCode.DATAPIPE_CONFIG_INVALID
             ),
         ) from err
-    if is_business_validator:
-        return config
-    if unit_io_field is None:
-        return []
-    return config.check_unit_io(unit_io_field)
+    issues = (
+        config.check_unit_io(unit_io_field)
+        if unit_io_field is not None
+        else []
+    )
+    if not is_business_validator:
+        return issues
+    if issues:
+        first = issues[0]
+        resolved = ErrorCode(first.error_code)
+        raise DataPipeError(first.message, code=resolved)
+    return config

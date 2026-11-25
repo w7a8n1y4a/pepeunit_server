@@ -1,6 +1,6 @@
 import uuid as uuid_pkg
 
-from pydantic import BaseModel
+from pydantic import Base64Bytes, BaseModel
 
 
 class UnitVersionSelection(BaseModel):
@@ -11,3 +11,9 @@ class UnitVersionSelection(BaseModel):
     is_auto_update_unit: bool
     is_compilable_unit: bool
     is_only_tag_update: bool
+
+
+class SnapshotManifestSource(BaseModel):
+    repo_uuid: uuid_pkg.UUID
+    commit: str
+    content: Base64Bytes

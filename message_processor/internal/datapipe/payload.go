@@ -29,13 +29,6 @@ var errNonFiniteNumber = errors.New("JSON numbers must be finite")
 
 var jsonNumberDecoder = jsonv2.WithUnmarshalers(jsonv2.UnmarshalFromFunc(readJSONNumber))
 
-var jsonFloatEncoder = jsonv2.WithMarshalers(jsonv2.MarshalFunc(func(value float64) ([]byte, error) {
-	if math.IsInf(value, 0) || math.IsNaN(value) {
-		return nil, errNonFiniteNumber
-	}
-	return []byte(formatJSONFloat(value)), nil
-}))
-
 func readJSONNumber(decoder *jsontext.Decoder, value *any) error {
 	if decoder.PeekKind() != jsontext.KindNumber {
 		return errors.ErrUnsupported

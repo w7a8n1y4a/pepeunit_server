@@ -12,6 +12,7 @@ from app.configs.error_codes import ErrorCode
 from app.dto.enum import (
     FilterTypeValueFiltering,
     FilterTypeValueThreshold,
+    InstanceResourceMetric,
     NotificationType,
     OperationTaskStatus,
     OperationTaskType,
@@ -68,6 +69,29 @@ class InstanceDailyStateData(NotificationContent):
         ]
         return make_monospace_table_with_title(
             table, "Instance daily summary", lengths=[8, 40]
+        )
+
+
+class InstanceResourceLimitData(NotificationContent):
+    metrics: dict[InstanceResourceMetric, float]
+
+    @property
+    def small_text(self) -> str:
+        return short_line(
+            ", ".join(
+                f"{metric.value} {percent:.1f}%"
+                for metric, percent in self.metrics.items()
+            )
+        )
+
+    @property
+    def table_text(self) -> str:
+        rows = [
+            [metric.value, f"{percent:.1f}%"]
+            for metric, percent in self.metrics.items()
+        ]
+        return make_monospace_table_with_title(
+            [["Resource", "Usage"], *rows], "Instance resource limits"
         )
 
 

@@ -599,12 +599,31 @@ class CacheKey(str, enum.Enum):
     INSTANCE_METRICS_PUBLIC = "InstanceMetricsPublic"
 
 
+class LogporterMetric(enum.StrEnum):
+    CPU_CORES = "docker_cpu_total_number"
+    CPU_SECONDS = "docker_cpu_usage_total"
+    MEMORY_TOTAL = "docker_memory_total"
+    MEMORY_USAGE = "docker_memory_usage"
+    NETWORK_RECEIVED = "docker_network_received_bytes"
+    NETWORK_TRANSMITTED = "docker_network_transmit_bytes"
+
+
+class InstanceResourceMetric(enum.StrEnum):
+    CPU = "CPU"
+    RAM = "RAM"
+    NETWORK_WIDTH = "Network speed"
+    POSTGRESQL = "PostgreSQL"
+    CLICKHOUSE = "ClickHouse"
+    MONTHLY_TRAFFIC = "Monthly traffic"
+
+
 class NotificationType(str, enum.Enum):
     """
     What a notification shows
     """
 
     INSTANCE_DAILY_STATE = "InstanceDailyState"
+    INSTANCE_RESOURCE_LIMIT = "InstanceResourceLimit"
     UNIT_DAILY_SUMMARY = "UnitDailySummary"
     DATA_PIPE_ALERT = "DataPipeAlert"
     INTEGRATION_TESTS = OperationTaskType.INTEGRATION_TESTS.value
@@ -625,6 +644,7 @@ class FileLock(str, enum.Enum):
     UPDATE_REPOS = "tmp/update_repos.lock"
     UPDATE_REPO = "tmp/update_repo.lock"
     COLLECT_PEERS = "tmp/collect_peers.lock"
+    INSTANCE_RESOURCES = "tmp/instance_resources.lock"
     NOTIFICATION_SCHEDULE = "tmp/notification_schedule.lock"
     NOTIFICATION_PROCESS = "tmp/notification_process.lock"
 

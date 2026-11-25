@@ -172,6 +172,15 @@ class AppSettings(SettingsValidationMixin, BaseModel):
         default="./prometheus_metrics", max_length=128
     )
 
+    pu_logporter_url: str = Field(
+        default="http://logporter:9333", max_length=512
+    )
+
+    @field_validator("pu_logporter_url")
+    @classmethod
+    def validate_logporter_url(cls, value: str) -> str:
+        return cls.require_http_url(value, "PU_LOGPORTER_URL")
+
     pu_http_type: str = "https"
     pu_link: str = ""
     pu_link_prefix: str = ""

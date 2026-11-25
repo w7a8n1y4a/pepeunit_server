@@ -10,7 +10,7 @@ from app.configs.db import get_session
 from app.configs.error_codes import ErrorCode
 from app.configs.errors import UserError
 from app.domain.user_model import User
-from app.dto.enum import UserRole, UuidEntity
+from app.dto.enum import UserRole, UserStatus, UuidEntity
 from app.repositories.base_repository import BaseRepository
 from app.repositories.utils import (
     apply_enums,
@@ -53,7 +53,10 @@ class UserRepository(BaseRepository):
 
     def get_owner(self) -> User | None:
         return self.db.exec(
-            select(User).where(User.role == UserRole.OWNER.value)
+            select(User).where(
+                User.role == UserRole.OWNER.value,
+                User.status != UserStatus.BLOCKED.value,
+            )
         ).first()
 
     def set_single_owner(self, user_uuid: uuid_pkg.UUID) -> User:

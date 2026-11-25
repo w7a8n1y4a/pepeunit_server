@@ -3,12 +3,13 @@ from datetime import datetime
 
 from fastapi import Depends
 from sqlalchemy import update
-from sqlmodel import Session, col
+from sqlmodel import Session, col, select
 
 from app.configs.db import get_session
 from app.domain.notification_model import Notification
 from app.domain.notification_settings_model import NotificationSettings
 from app.domain.user_model import User
+from app.dto.enum import NotificationType
 from app.repositories.base_repository import BaseRepository
 from app.repositories.utils import apply_enums, apply_offset_and_limit
 from app.schemas.pydantic.notification import NotificationFilter
@@ -54,6 +55,13 @@ class NotificationRepository(BaseRepository[Notification]):
         query = query.order_by(col(Notification.create_datetime).desc())
         count, query = apply_offset_and_limit(query, filters)
         return count, query.all()
+
+    def has_recent(self, kind: NotificationType, since: datetime) -> bool:
+        statement = select(Notification.uuid).where(
+            Notification.type == kind.value,
+            Notification.create_datetime > since,
+        )
+        return self.db.exec(statement.limit(1)).first() is not None
 
     def bulk_create(
         self, notifications: list[Notification]

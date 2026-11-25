@@ -2,7 +2,7 @@ import uuid as uuid_pkg
 from typing import ClassVar
 
 import httpx
-from sqlalchemy import Column, ForeignKey
+from sqlalchemy import BigInteger, Column, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from sqlmodel import Field, SQLModel
 
@@ -61,6 +61,16 @@ class InstanceSettings(SQLModel, table=True):
     pu_ff_notification_enable: bool = Field(nullable=False, default=True)
     pu_ff_prometheus_enable: bool = Field(nullable=False, default=True)
     pu_ff_telegram_bot_enable: bool = Field(nullable=False, default=False)
+
+    pu_instance_pg_size_limit: int = Field(default=2**30, sa_type=BigInteger)
+    pu_instance_cc_size_limit: int = Field(default=2**30, sa_type=BigInteger)
+    pu_instance_network_speed_limit: int = Field(
+        default=2**24, sa_type=BigInteger
+    )
+    pu_instance_network_monthly_traffic_limit: int = Field(
+        default=3 * 2**40, sa_type=BigInteger
+    )
+    pu_instance_network_traffic_reset_day: int = Field(default=1)
 
     pu_instance_cipher_max_length: int = Field(
         nullable=False, default=1_000_000

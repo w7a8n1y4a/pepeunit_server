@@ -13,6 +13,9 @@ from app.repositories.dashboard_panel_repository import (
 from app.repositories.dashboard_repository import DashboardRepository
 from app.repositories.data_pipe_repository import DataPipeRepository
 from app.repositories.icon_repository import IconRepository
+from app.repositories.instance_resources_repository import (
+    InstanceResourcesRepository,
+)
 from app.repositories.instance_settings_repository import (
     InstanceSettingsRepository,
 )
@@ -46,6 +49,7 @@ from app.repositories.user_repository import UserRepository
 from app.services.access_service import AccessService
 from app.services.grafana_service import GrafanaService
 from app.services.icon_service import IconService
+from app.services.instance_resources_service import InstanceResourcesService
 from app.services.instance_settings_service import InstanceSettingsService
 from app.services.metrics_service import MetricsService
 from app.services.notification_service import NotificationService
@@ -127,6 +131,13 @@ class ServiceFactory:
             notification_settings_repository=(
                 self.notification_settings_repository
             ),
+        )
+
+    def get_instance_resources_service(self) -> InstanceResourcesService:
+        return InstanceResourcesService(
+            repository=InstanceResourcesRepository(self.client, self.db),
+            access_service=self.access_service,
+            notification_service=self.get_notification_service(),
         )
 
     def get_instance_settings_service(self) -> InstanceSettingsService:
@@ -257,6 +268,7 @@ class ServiceFactory:
             unit_log_repository=self.unit_log_repository,
             loki_repository=self.loki_repository,
             access_service=self.access_service,
+            user_repository=self.user_repository,
         )
 
 
@@ -288,6 +300,16 @@ def get_peer_service(
     jwt_token: str | None = Depends(token_depends),
 ) -> PeerService:
     return create_service_factory(db, None, jwt_token).get_peer_service()
+
+
+def get_instance_resources_service(
+    db: Session = Depends(get_session),
+    client: Client = Depends(get_clickhouse_client),
+    jwt_token: str | None = Depends(token_depends),
+) -> InstanceResourcesService:
+    return create_service_factory(
+        db, client, jwt_token
+    ).get_instance_resources_service()
 
 
 def get_instance_settings_service(

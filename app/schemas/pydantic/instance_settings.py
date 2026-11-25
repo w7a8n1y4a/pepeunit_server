@@ -35,6 +35,7 @@ class InstanceSettingsData(SettingsValidationMixin, BaseModel):
         r"^[1-9]\d*(?:\.\d+)?(?:KB|MB|GB|B)/[smh]$",
         re.IGNORECASE,
     )
+    MAX_RESOURCE_LIMIT: ClassVar[int] = 2**63 - 1
 
     icon_uuid: uuid_pkg.UUID
 
@@ -52,6 +53,14 @@ class InstanceSettingsData(SettingsValidationMixin, BaseModel):
     pu_ff_notification_enable: bool
     pu_ff_prometheus_enable: bool
     pu_ff_telegram_bot_enable: bool
+
+    pu_instance_pg_size_limit: int = Field(ge=1, le=MAX_RESOURCE_LIMIT)
+    pu_instance_cc_size_limit: int = Field(ge=1, le=MAX_RESOURCE_LIMIT)
+    pu_instance_network_speed_limit: int = Field(ge=1, le=MAX_RESOURCE_LIMIT)
+    pu_instance_network_monthly_traffic_limit: int = Field(
+        ge=1, le=MAX_RESOURCE_LIMIT
+    )
+    pu_instance_network_traffic_reset_day: int = Field(ge=1, le=31)
 
     pu_instance_cipher_max_length: int = Field(ge=100_000, le=5_000_000)
     pu_instance_github_token_name: str = Field(max_length=128)
@@ -231,6 +240,12 @@ class InstanceSettingsUpdate(BaseModel):
     pu_ff_notification_enable: bool | None = None
     pu_ff_prometheus_enable: bool | None = None
     pu_ff_telegram_bot_enable: bool | None = None
+
+    pu_instance_pg_size_limit: int | None = None
+    pu_instance_cc_size_limit: int | None = None
+    pu_instance_network_speed_limit: int | None = None
+    pu_instance_network_monthly_traffic_limit: int | None = None
+    pu_instance_network_traffic_reset_day: int | None = None
 
     pu_instance_cipher_max_length: int | None = None
     pu_instance_github_token_name: str | None = None

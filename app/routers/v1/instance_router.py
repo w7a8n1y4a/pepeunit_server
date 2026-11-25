@@ -1,14 +1,18 @@
 from fastapi import APIRouter, Depends, status
+from pydantic import AwareDatetime
 
 from app.configs.rest import (
+    get_instance_resources_service,
     get_instance_settings_service,
     get_peer_service,
 )
 from app.schemas.pydantic.instance import CurrentInstanceSchemaV1
+from app.schemas.pydantic.instance_resources import InstanceResourceSample
 from app.schemas.pydantic.instance_settings import (
     InstanceSettingsRead,
     InstanceSettingsUpdate,
 )
+from app.services.instance_resources_service import InstanceResourcesService
 from app.services.instance_settings_service import InstanceSettingsService
 from app.services.peer_service import PeerService
 
@@ -32,6 +36,17 @@ def update_instance_settings(
     ),
 ):
     return instance_settings_service.update(data)
+
+
+@router.get("/resources", response_model=list[InstanceResourceSample])
+def get_instance_resources(
+    start_datetime: AwareDatetime,
+    end_datetime: AwareDatetime,
+    service: InstanceResourcesService = Depends(
+        get_instance_resources_service
+    ),
+) -> list[InstanceResourceSample]:
+    return service.history(start_datetime, end_datetime)
 
 
 @router.post("/reboot", status_code=status.HTTP_204_NO_CONTENT)

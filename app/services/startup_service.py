@@ -17,6 +17,7 @@ from app.configs.utils import acquire_file_lock, wait_for_file_unlock
 from app.dto.agent.abc import AgentBackend
 from app.dto.enum import FileLock
 from app.repositories.grafana_repository import GrafanaRepository
+from app.repositories.logporter_repository import LogporterRepository
 from app.schemas.mqtt.manager import MqttManager
 from app.services.background import BackgroundService
 from app.services.notification_delivery import notification_delivery
@@ -120,6 +121,11 @@ class StartupService:
                     self._update_repo,
                 ),
                 name="automatic_update_repo",
+            )
+        )
+        self._singleton_tasks.append(
+            asyncio.create_task(
+                self.run_instance_resources(), name="instance_resources"
             )
         )
         if runtime.get().pu_ff_notification_enable:
@@ -326,6 +332,38 @@ class StartupService:
         )
         self._singleton_tasks.append(task)
         await notification_delivery.telegram.ready.wait()
+
+    async def run_instance_resources(self) -> None:
+        logporter = LogporterRepository()
+        lock = None
+        try:
+            while True:
+                await asyncio.sleep(self._seconds_until_next_minute())
+                if lock is None:
+                    lock = acquire_file_lock(FileLock.INSTANCE_RESOURCES)
+                    if lock is None:
+                        continue
+                work = asyncio.create_task(
+                    asyncio.to_thread(
+                        self.collect_instance_resources, logporter
+                    )
+                )
+                try:
+                    await asyncio.shield(work)
+                except asyncio.CancelledError:
+                    with suppress(Exception):
+                        await work
+                    raise
+                except Exception:
+                    logging.exception("Instance resource sample failed")
+        finally:
+            if lock is not None:
+                lock.close()
+
+    @staticmethod
+    def collect_instance_resources(logporter: LogporterRepository) -> None:
+        with BackgroundService() as services:
+            services.get_instance_resources_service().collect(logporter)
 
     async def _run_scheduled_notifications(self) -> None:
         # Once a minute, the resolution of scheduled_notification_time.

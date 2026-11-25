@@ -13,6 +13,7 @@ from app.domain.notification_settings_model import NotificationSettings
 from app.domain.user_model import User
 from app.dto.enum import (
     AgentType,
+    InstanceResourceMetric,
     LogLevel,
     NotFoundEntity,
     NotificationType,
@@ -27,11 +28,13 @@ from app.repositories.notification_settings_repository import (
 )
 from app.repositories.unit_log_repository import UnitLogRepository
 from app.repositories.unit_repository import UnitRepository
+from app.repositories.user_repository import UserRepository
 from app.schemas.pydantic.notification import (
     OPERATION_TASK_ALERTS,
     DataPipeAlertData,
     InstanceDailyStateData,
     InstanceError,
+    InstanceResourceLimitData,
     NotificationFilter,
     NotificationSettingsUpdate,
     UnitDailySummaryData,
@@ -51,9 +54,12 @@ class NotificationService:
     SCHEDULED_LOG_WINDOW = timedelta(days=1)
     INSTANCE_ERROR_GROUPS = 3
     UNIT_SUMMARY_LIMIT = 10
+    RESOURCE_LIMIT_PERCENT = 90
+    RESOURCE_ALERT_INTERVAL = timedelta(minutes=15)
     ALERT_LEVELS = [LogLevel.ERROR.value, LogLevel.CRITICAL.value]
     PAYLOADS = {
         NotificationType.INSTANCE_DAILY_STATE: InstanceDailyStateData,
+        NotificationType.INSTANCE_RESOURCE_LIMIT: InstanceResourceLimitData,
         NotificationType.UNIT_DAILY_SUMMARY: UnitDailySummaryData,
         NotificationType.DATA_PIPE_ALERT: DataPipeAlertData,
         **OPERATION_TASK_ALERTS,
@@ -69,6 +75,7 @@ class NotificationService:
         unit_log_repository: UnitLogRepository = Depends(),
         loki_repository: LokiRepository = Depends(),
         access_service: AccessService = Depends(),
+        user_repository: UserRepository = Depends(),
     ) -> None:
         self.notification_repository = notification_repository
         self.notification_settings_repository = (
@@ -78,6 +85,7 @@ class NotificationService:
         self.unit_log_repository = unit_log_repository
         self.loki_repository = loki_repository
         self.access_service = access_service
+        self.user_repository = user_repository
 
     @staticmethod
     def is_notification_enable() -> None:
@@ -161,6 +169,36 @@ class NotificationService:
         )
         return self.notification_settings_repository.update(
             settings_row.uuid, updated
+        )
+
+    def notify_resource_limits(
+        self, metrics: dict[InstanceResourceMetric, float], moment: datetime
+    ) -> None:
+        exceeded = {
+            metric: percent
+            for metric, percent in metrics.items()
+            if percent > self.RESOURCE_LIMIT_PERCENT
+        }
+        if not exceeded:
+            return
+        kind = NotificationType.INSTANCE_RESOURCE_LIMIT
+        if self.notification_repository.has_recent(
+            kind, moment - self.RESOURCE_ALERT_INTERVAL
+        ):
+            return
+
+        owner = self.user_repository.get_owner()
+        is_valid_object(owner, NotFoundEntity.USER)
+        self.notification_settings_repository.get_or_create(owner.uuid)
+        self.notification_repository.create(
+            Notification(
+                create_datetime=moment,
+                type=kind.value,
+                data=InstanceResourceLimitData(metrics=exceeded).model_dump(
+                    mode="json"
+                ),
+                user_uuid=owner.uuid,
+            )
         )
 
     def generate_scheduled(self) -> list[Notification]:

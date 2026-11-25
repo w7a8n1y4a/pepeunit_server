@@ -9,7 +9,7 @@ from fastapi import Depends, UploadFile
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from app import runtime, settings
+from app import runtime
 from app.configs.error_codes import ErrorCode
 from app.configs.errors import (
     CustomException,
@@ -31,10 +31,9 @@ from app.dto.clickhouse.time_window import TimeWindow
 from app.dto.enum import (
     AgentType,
     BackendTopicCommand,
-    DestinationTopicType,
     FieldKey,
-    GlobalPrefixTopic,
     JsonPayload,
+    MqttQos,
     NotFoundEntity,
     OrderByDate,
     OwnershipType,
@@ -57,7 +56,7 @@ from app.repositories.repo_repository import (
 from app.repositories.unit_io_repository import UnitIORepository
 from app.repositories.unit_log_repository import UnitLogRepository
 from app.repositories.unit_repository import UnitRepository
-from app.schemas.mqtt.utils import publish_to_topic
+from app.schemas.mqtt.manager import mqtt_manager
 from app.schemas.pydantic.unit_io import (
     DataPipeConfigOptionsRead,
     DataPipeFilter,
@@ -287,7 +286,7 @@ class UnitIOService:
         self,
         uuid: uuid_pkg.UUID,
         data: UnitIOSetState,
-    ) -> tuple[UnitIO, bytes]:
+    ) -> tuple[UnitIO, bytes, MqttQos]:
         self.access_service.authorization.check_access(
             [AgentType.USER, AgentType.UNIT]
         )
@@ -358,19 +357,30 @@ class UnitIOService:
                 str(error), code=ErrorCode.UNIT_IO_STATE_INVALID
             ) from error
 
-        return unit_io, payload
+        return unit_io, payload, MqttQos(field[FieldKey.QOS])
 
     def set_state_input(
         self,
         uuid: uuid_pkg.UUID,
         data: UnitIOSetState,
     ) -> UnitIO:
-        unit_io, payload = self.check_input_state(uuid, data)
-        publish_to_topic(get_topic_name(unit_io.uuid), payload)
+        unit_io, payload, qos = self.check_input_state(uuid, data)
+        mqtt_manager.publish(get_topic_name(unit_io.uuid), payload, qos)
 
         unit_io.state = data.state
         unit_io.last_update_datetime = datetime.datetime.now(datetime.UTC)
         return self.unit_io_repository.update(uuid, unit_io)
+
+    def list_commands(
+        self, unit_uuid: uuid_pkg.UUID
+    ) -> list[BackendTopicCommand]:
+        topics = self.unit_io_repository.get_topic_uuids(unit_uuid)
+        return [
+            command
+            for command in BackendTopicCommand
+            if (UnitIOTypeEnum.INPUT, ReservedInputBaseTopic[command.name])
+            in topics
+        ]
 
     def command_to_input_base_topic(
         self,
@@ -408,63 +418,44 @@ class UnitIOService:
         selected_commit, selected_tag = (
             selected_commit_and_tag or rechecked_commit_and_tag
         )
-        self.git_repo_repository.is_valid_firmware_platform(
-            repo,
-            unit,
-            unit.target_firmware_platform,
-            (selected_commit, selected_tag),
-        )
-
-        command_to_topic_dict = {
-            BackendTopicCommand.UPDATE: ReservedInputBaseTopic.UPDATE.value,
-            BackendTopicCommand.ENV_UPDATE: ReservedInputBaseTopic.ENV_UPDATE.value,
-            BackendTopicCommand.SCHEMA_UPDATE: ReservedInputBaseTopic.SCHEMA_UPDATE.value,
-            BackendTopicCommand.LOG_SYNC: ReservedInputBaseTopic.LOG_SYNC.value,
-            BackendTopicCommand.RESET: ReservedInputBaseTopic.RESET.value,
-        }
-
-        input_name = command_to_topic_dict[command]
-        target_topic = input_name + GlobalPrefixTopic.BACKEND_SUB_PREFIX.value
+        input_name = ReservedInputBaseTopic[command.name]
         if manifest is None:
             manifest, _ = self.unit_manifest_service.read_from_commit(
                 repo, selected_commit
             )
-        if input_name in manifest.input:
-            update_message_dict = self._build_message_dict(
-                command,
-                repo,
-                unit,
-                selected_commit,
-                selected_tag,
+        field = manifest.input.get(input_name)
+        if field is None:
+            return
+
+        unit_io = self.unit_io_repository.get_by_topic(
+            unit.uuid, UnitIO(type=UnitIOTypeEnum.INPUT, topic_name=input_name)
+        )
+        is_valid_object(unit_io, NotFoundEntity.UNIT_IO)
+
+        message = self._build_message_dict(
+            command, repo, unit, selected_commit, selected_tag
+        )
+        try:
+            mqtt_manager.publish(
+                get_topic_name(unit_io.uuid),
+                message,
+                MqttQos(field[FieldKey.QOS]),
             )
+        except MqttError as error:
+            if command == BackendTopicCommand.UPDATE:
+                unit.firmware_update_error = error.message
+                unit.last_firmware_update_datetime = None
+                unit.firmware_update_status = UnitFirmwareUpdateStatus.ERROR
+                self.unit_repository.update(unit.uuid, unit)
+            raise
 
-            try:
-                publish_to_topic(
-                    f"{settings.pu_domain}/{DestinationTopicType.INPUT_BASE_TOPIC.value}/{unit.uuid}/{target_topic}",
-                    update_message_dict,
-                )
-                if command == BackendTopicCommand.UPDATE:
-                    unit.firmware_update_error = None
-                    unit.last_firmware_update_datetime = datetime.datetime.now(
-                        datetime.UTC
-                    )
-                    unit.firmware_update_status = (
-                        UnitFirmwareUpdateStatus.REQUEST_SENT
-                    )
-
-                    self.unit_repository.update(unit.uuid, unit)
-
-            except MqttError as e:
-                if command == BackendTopicCommand.UPDATE:
-                    unit.firmware_update_error = e.message
-                    unit.last_firmware_update_datetime = None
-                    unit.firmware_update_status = (
-                        UnitFirmwareUpdateStatus.ERROR
-                    )
-
-                    self.unit_repository.update(unit.uuid, unit)
-
-                raise e
+        if command == BackendTopicCommand.UPDATE:
+            unit.firmware_update_error = None
+            unit.last_firmware_update_datetime = datetime.datetime.now(
+                datetime.UTC
+            )
+            unit.firmware_update_status = UnitFirmwareUpdateStatus.REQUEST_SENT
+            self.unit_repository.update(unit.uuid, unit)
 
     def _build_message_dict(
         self,
@@ -472,7 +463,7 @@ class UnitIOService:
         repo: Repo,
         unit: Unit,
         selected_commit: str,
-        selected_tag: str,
+        selected_tag: str | None,
     ) -> dict:
         message_dict = {"COMMAND": command}
 
@@ -481,12 +472,8 @@ class UnitIOService:
                 selected_commit
             )
             if unit.is_compilable_unit:
-                links = is_valid_json(
-                    repo.releases_data,
-                    JsonPayload.RELEASES_FOR_COMPILE_REPO_TITLE,
-                )[selected_tag]
-                _, link = self.git_repo_repository.find_by_platform(
-                    links, unit.target_firmware_platform
+                _, link = self.git_repo_repository.get_firmware_asset(
+                    repo, selected_tag, unit.target_firmware_platform
                 )
                 message_dict["COMPILED_FIRMWARE_LINK"] = link
 
@@ -626,13 +613,6 @@ class UnitIOService:
 
         link = self.link_repository.create(new_link)
         notify_message_processor()
-
-        with contextlib.suppress(MqttError):
-            self.command_to_input_base_topic(
-                uuid=input_node.unit_uuid,
-                command=BackendTopicCommand.SCHEMA_UPDATE,
-                is_auto_update=True,
-            )
 
         return link
 
@@ -888,13 +868,6 @@ class UnitIOService:
 
         self.link_repository.delete(link)
         notify_message_processor()
-
-        with contextlib.suppress(MqttError):
-            self.command_to_input_base_topic(
-                uuid=input_node.unit_uuid,
-                command=BackendTopicCommand.SCHEMA_UPDATE,
-                is_auto_update=True,
-            )
 
     def list(self, filters: UnitIOFilter) -> tuple[int, list[UnitIO]]:
         self.access_service.authorization.check_access(

@@ -158,27 +158,6 @@ class ReservedInputBaseTopic(str, enum.Enum):
     RESET = "reset"
 
 
-class DestinationTopicType(str, enum.Enum):
-    """
-    Allowed types of mqtt topic destinations
-    """
-
-    INPUT_BASE_TOPIC = "input_base_topic"
-    OUTPUT_BASE_TOPIC = "output_base_topic"
-    INPUT_TOPIC = "input_topic"
-    OUTPUT_TOPIC = "output_topic"
-
-
-class GlobalPrefixTopic(str, enum.Enum):
-    """
-    Global topic prefixes
-    """
-
-    BACKEND_SUB_PREFIX = (
-        "/pepeunit"  # forwards the mqtt message to the Pepeunit instance
-    )
-
-
 class SchemaFileName(str, enum.Enum):
     DICTIONARY = "dictionary.yml"
 
@@ -268,29 +247,20 @@ class MqttQos(int, enum.Enum):
     AT_LEAST_ONCE = 1
 
 
+class FirmwareArchiveFormat(str, enum.Enum):
+    ZIP = "zip"
+    TAR = "tar"
+
+
 class StaticRepoFileName(str, enum.Enum):
     """
     Static files
     """
 
     UNIT_MANIFEST = "unit.yml"
-    SCHEMA = "schema.json"
+    PEPEIGNORE = ".pepeignore"
     IO_TOPICS = "io_topics.yml"
     ENV = ".env"
-
-
-class ReservedStateKey(str, enum.Enum):
-    """
-    Reserved state Unit keys
-    """
-
-    IFCONFIG = "ifconfig"
-    MILLIS = "millis"
-    MEM_FREE = "mem_free"
-    MEM_ALLOC = "mem_alloc"
-    FREQ = "freq"
-    STATVFS = "statvfs"
-    PU_COMMIT_VERSION = "pu_commit_version"
 
 
 class ReservedEnvVariableName(str, enum.Enum):
@@ -652,7 +622,6 @@ class NotificationType(str, enum.Enum):
 class FileLock(str, enum.Enum):
     INIT = "tmp/init_lock.lock"
     MQTT_RUN = "tmp/mqtt_run_lock.lock"
-    MQTT_SUBSCRIBE = "tmp/mqtt_subscribe.lock"
     UPDATE_REPOS = "tmp/update_repos.lock"
     UPDATE_REPO = "tmp/update_repo.lock"
     COLLECT_PEERS = "tmp/collect_peers.lock"
@@ -730,8 +699,6 @@ class UuidEntity(str, enum.Enum):
 class JsonPayload(str, enum.Enum):
     """Name passed to is_valid_json."""
 
-    HARDWARE_STATE = "Hardware state"
-    UNIT_HARDWARE_LOG = "Unit hardware log"
     DATA_PIPE_CONFIG = "DataPipe config"
     UNIT_IO_STATE = "UnitIO state"
     CIPHER_ENV = "Cipher env"
@@ -742,4 +709,4 @@ class JsonPayload(str, enum.Enum):
     )
     OLD_CREDENTIALS_STRUCT = "Old credentials struct"
     PRIVATE_REPO = "Private Repo"
-    ENV = "env.json"
+    UNIT_ENV = "Unit settings"

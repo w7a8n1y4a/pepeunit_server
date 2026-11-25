@@ -2,6 +2,7 @@ import logging
 import time
 
 import httpx
+from pydantic import JsonValue
 
 from app import runtime, settings
 
@@ -43,12 +44,11 @@ class ControlEmqx:
             "Content-Type": "application/json",
         }
 
-    async def init(self):
+    async def init(self) -> None:
+        await self.set_auth_settings()
         await self.delete_auth_hooks()
         await self.set_file_auth_hook()
         await self.set_http_auth_hook()
-        await self.set_redis_auth_hook()
-        await self.set_auth_cache_ttl()
         await self.set_tcp_listener_settings()
         await self.set_global_mqtt_settings()
 
@@ -89,75 +89,42 @@ class ControlEmqx:
         return response.json()["token"]
 
     async def delete_auth_hooks(self) -> None:
-        for source in ["file", "http", "redis"]:
-            logging.info(f"Del {source} auth hook MQTT Broker")
-            async with httpx.AsyncClient(
-                timeout=runtime.get().http_timeout()
-            ) as client:
-                response = await client.delete(
-                    f"{self.current_link}/api/v5/authorization/sources/{source}",
-                    headers=self.headers,
-                )
-            self._log_response(response)
+        sources = f"{self.current_link}/api/v5/authorization/sources"
+        async with httpx.AsyncClient(
+            timeout=runtime.get().http_timeout(),
+            headers=self.headers,
+        ) as client:
+            for source in ("file", "http", "redis"):
+                logging.info("Delete %s auth hook MQTT Broker", source)
+                response = await client.delete(f"{sources}/{source}")
+                if response.status_code != httpx.codes.NOT_FOUND:
+                    response.raise_for_status()
 
     async def set_file_auth_hook(self) -> None:
-        data = {
-            "type": "file",
-            "enable": True,
-            "rules": """{allow, {ipaddr, "127.0.0.1"}, all, ["$SYS/#", "#"]}.\n{deny, all, subscribe, ["$SYS/#", {eq, "#"}]}.\n{deny, all}.""",
-        }
+        await self.set_auth_hook(
+            "file", {"enable": True, "rules": "{deny, all}.\n"}
+        )
 
-        logging.info("Set ACL file auth hook MQTT Broker")
+    async def set_auth_hook(
+        self, source: str, config: dict[str, JsonValue]
+    ) -> None:
+        logging.info("Set %s auth hook MQTT Broker", source)
         async with httpx.AsyncClient(
-            timeout=runtime.get().http_timeout()
+            timeout=runtime.get().http_timeout(),
+            headers=self.headers,
         ) as client:
             response = await client.post(
                 f"{self.current_link}/api/v5/authorization/sources",
-                json=data,
-                headers=self.headers,
+                json={"type": source, **config},
             )
-        self._log_response(response)
-
-    async def set_redis_auth_hook(self) -> None:
-        redis_url = settings.pu_mqtt_redis_auth_url
-
-        data = {
-            "type": "redis",
-            "enable": True,
-            "server": redis_url[:-2].replace("redis://", ""),
-            "redis_type": "single",
-            "pool_size": 8,
-            "username": "",
-            "password": "",
-            "database": int(redis_url.split("/")[-1]),
-            "auto_reconnect": True,
-            "ssl": {
-                "enable": False,
-                "versions": ["tlsv1.3", "tlsv1.2"],
-                "verify": "verify_peer",
-                "reuse_sessions": True,
-                "depth": 10,
-                "secure_renegotiate": True,
-                "log_level": "emergency",
-                "hibernate_after": "12m",
-            },
-            "cmd": "HGETALL mqtt_acl:${username}",
-        }
-
-        logging.info("Set redis auth hook MQTT Broker")
-        async with httpx.AsyncClient(
-            timeout=runtime.get().http_timeout()
-        ) as client:
-            response = await client.post(
-                f"{self.current_link}/api/v5/authorization/sources",
-                json=data,
-                headers=self.headers,
-            )
-        self._log_response(response)
+            response.raise_for_status()
 
     async def set_http_auth_hook(self) -> None:
         data = {
-            "body": {"token": "${username}", "topic": "${topic}"},
+            "body": {
+                "token": "${username}",
+                "topic": "${topic}",
+            },
             "connect_timeout": "15s",
             "enable": True,
             "enable_pipelining": 100,
@@ -175,44 +142,33 @@ class ControlEmqx:
                 "hibernate_after": "5s",
                 "depth": 10,
             },
-            "type": "http",
-            "url": f"{settings.pu_link_prefix_and_v1}/units/auth",
+            "url": (
+                f"{settings.pu_link_prefix_and_v1}/units/auth"
+                "?action=${action}"
+            ),
         }
+        await self.set_auth_hook("http", data)
 
-        logging.info("Set http auth hook MQTT Broker")
-        async with httpx.AsyncClient(
-            timeout=runtime.get().http_timeout()
-        ) as client:
-            response = await client.post(
-                f"{self.current_link}/api/v5/authorization/sources",
-                json=data,
-                headers=self.headers,
-            )
-        self._log_response(response)
-
-    async def set_auth_cache_ttl(self) -> None:
+    async def set_auth_settings(self) -> None:
+        authorization = f"{self.current_link}/api/v5/authorization"
         data = {
             "no_match": "deny",
             "deny_action": "ignore",
-            "cache": {
-                "enable": True,
-                "max_size": 64,
-                "ttl": "10m",
-                "excludes": [],
-            },
+            "cache": {"enable": False},
         }
-
-        logging.info("Set cache settings auth hook MQTT Broker")
-
+        logging.info("Set authorization settings MQTT Broker")
         async with httpx.AsyncClient(
-            timeout=runtime.get().http_timeout()
+            timeout=runtime.get().http_timeout(),
+            headers=self.headers,
         ) as client:
+            response = await client.put(f"{authorization}/settings", json=data)
+            response.raise_for_status()
+
             response = await client.put(
-                f"{self.current_link}/api/v5/authorization/settings",
-                json=data,
-                headers=self.headers,
+                f"{authorization}/node_cache", json={"enable": False}
             )
-        self._log_response(response)
+            if response.status_code != httpx.codes.NOT_FOUND:
+                response.raise_for_status()
 
     async def disable_default_listeners(self) -> None:
         async with httpx.AsyncClient(

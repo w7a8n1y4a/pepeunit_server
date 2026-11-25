@@ -30,7 +30,7 @@ from app.schemas.bot.unit_bot_router import UnitBotRouter
 from app.schemas.bot.unit_io_bot_router import UnitIOBotRouter
 from app.schemas.bot.unit_log_bot_router import UnitLogBotRouter
 from app.schemas.bot.utils import build_telegram_bot
-from app.schemas.mqtt.topic import mqtt
+from app.schemas.mqtt.manager import mqtt_manager
 from app.services.startup_service import StartupService
 
 setup_logging()
@@ -44,13 +44,15 @@ if runtime.get().pu_ff_prometheus_enable:
 async def _lifespan(_app: FastAPI):
     startup = StartupService(
         _app,
-        mqtt,
+        mqtt_manager,
         bot if runtime.get().pu_ff_telegram_bot_enable else None,
         dp if runtime.get().pu_ff_telegram_bot_enable else None,
     )
-    await startup.start()
-    yield
-    await startup.stop()
+    try:
+        await startup.start()
+        yield
+    finally:
+        await startup.stop()
 
 
 class CustomExceptionMiddleware:
@@ -151,5 +153,3 @@ app.include_router(
     api_router,
     prefix=f"{settings.pu_app_prefix}{settings.pu_api_v1_prefix}",
 )
-
-mqtt.init_app(app)

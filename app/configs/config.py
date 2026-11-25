@@ -287,10 +287,6 @@ class MqttSettings(SettingsValidationMixin, BaseModel):
     pu_mqtt_username: str = Field(max_length=128)
     pu_mqtt_password: str = Field(max_length=128)
 
-    pu_mqtt_redis_auth_url: str = Field(
-        default="redis://redis:6379/0", max_length=512
-    )
-
     pu_mqtt_http_type: str = "https"
 
     @field_validator("pu_mqtt_host")
@@ -302,15 +298,6 @@ class MqttSettings(SettingsValidationMixin, BaseModel):
     @classmethod
     def validate_mqtt_secret(cls, value: str, info: ValidationInfo) -> str:
         return cls.require_non_empty(value, cls.env_name(info))
-
-    @field_validator("pu_mqtt_redis_auth_url")
-    @classmethod
-    def validate_mqtt_redis_url(cls, value: str) -> str:
-        return cls.require_url(
-            value,
-            ("redis", "rediss"),
-            "PU_MQTT_REDIS_AUTH_URL",
-        )
 
     @model_validator(mode="after")
     def compute_mqtt_http_type(self):

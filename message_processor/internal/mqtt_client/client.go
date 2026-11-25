@@ -5,10 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
-	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"message_processor/internal/config"
@@ -21,15 +18,9 @@ import (
 
 const (
 	subscribeTimeout      = 10 * time.Second
-	subscribeRetryMin     = time.Second
 	sessionExpirySeconds  = 24 * 60 * 60
 	defaultKeepAliveSecs  = 60
 	reconnectBackoffDelay = 5 * time.Second
-	// Same paths as FileLock.MQTT_RUN and FileLock.MQTT_SUBSCRIBE.
-	// A held subscribe lock means a live backend worker is past EMQX
-	// setup. A held run lock means that setup is still rewriting hooks.
-	mqttRunLock       = "tmp/mqtt_run_lock.lock"
-	mqttSubscribeLock = "tmp/mqtt_subscribe.lock"
 )
 
 type MQTTClient struct {
@@ -41,7 +32,6 @@ type MQTTClient struct {
 	ctx            context.Context
 	cancel         context.CancelFunc
 	wg             sync.WaitGroup
-	connected      bool
 	// connGen increments on every successful broker connection.
 	// Subscribe retries are bound to a generation so a stale disconnect
 	// callback cannot abort resubscribe on the live connection.
@@ -71,7 +61,7 @@ func New(cfg *config.Config, messageHandler func(topic string, payload []byte)) 
 	return client, nil
 }
 
-func (c *MQTTClient) Connect() error {
+func (c *MQTTClient) Connect(ctx context.Context) error {
 	var connectErr error
 	c.connectOnce.Do(func() {
 		token, err := generateToken(c.cfg)
@@ -123,18 +113,15 @@ func (c *MQTTClient) Connect() error {
 			},
 			OnConnectError: func(err error) {
 				logging.Warningf("MQTT connection error: %v", err)
-				c.markDisconnected()
 			},
 			ClientConfig: paho.ClientConfig{
 				ClientID: c.cfg.Domain,
 				Router:   c.router,
 				OnClientError: func(err error) {
 					logging.Warningf("MQTT client error: %v", err)
-					c.markDisconnected()
 				},
 				OnServerDisconnect: func(disconnect *paho.Disconnect) {
 					logging.Warningf("MQTT server disconnected: %v", disconnect)
-					c.markDisconnected()
 				},
 			},
 			ConnectUsername: token,
@@ -154,7 +141,7 @@ func (c *MQTTClient) Connect() error {
 		c.cm = cm
 		c.connMu.Unlock()
 
-		if err := cm.AwaitConnection(c.ctx); err != nil {
+		if err := cm.AwaitConnection(ctx); err != nil {
 			connectErr = fmt.Errorf("failed to wait for connection: %w", err)
 			return
 		}
@@ -166,15 +153,8 @@ func (c *MQTTClient) Connect() error {
 func (c *MQTTClient) markConnected() uint64 {
 	c.connMu.Lock()
 	defer c.connMu.Unlock()
-	c.connected = true
 	c.connGen++
 	return c.connGen
-}
-
-func (c *MQTTClient) markDisconnected() {
-	c.connMu.Lock()
-	c.connected = false
-	c.connMu.Unlock()
 }
 
 func (c *MQTTClient) currentConnGen() uint64 {
@@ -191,119 +171,21 @@ func (c *MQTTClient) startSubscribeRetry(cm *autopaho.ConnectionManager, gen uin
 	}()
 }
 
-// subscribeWithRetry subscribes once this connection is allowed to.
-// A failed SUBSCRIBE closes the socket. autopaho then opens a new
-// session, which drops a broker denial cached on the old connection.
 func (c *MQTTClient) subscribeWithRetry(cm *autopaho.ConnectionManager, gen uint64) {
-	announcedWait := false
-
-	for {
-		if c.subscriptionStopped(gen) {
-			return
-		}
-
-		ready, err := backendMQTTReady()
-		if err != nil {
-			logging.Warningf("MQTT backend lock check failed: %v", err)
-		} else if !ready {
-			if !announcedWait {
-				logging.Infof("Waiting for backend MQTT subscribe lock before subscribing to %s", c.subscriptionTopic())
-				announcedWait = true
-			}
-			if !c.sleep(subscribeRetryMin, gen) {
-				return
-			}
-			continue
-		}
-
-		if err := c.subscribe(cm); err != nil {
-			logging.Warningf("Failed to subscribe, reconnecting MQTT: %v", err)
-			if c.currentConnGen() == gen {
-				cm.TerminateConnectionForTest()
-			}
-			return
-		}
+	if c.ctx.Err() != nil || c.currentConnGen() != gen {
 		return
 	}
-}
-
-func (c *MQTTClient) subscriptionStopped(gen uint64) bool {
-	select {
-	case <-c.ctx.Done():
-		logging.Infof("Stop subscribe attempts due to context cancellation")
-		return true
-	default:
-	}
-	return c.currentConnGen() != gen
-}
-
-func (c *MQTTClient) sleep(delay time.Duration, gen uint64) bool {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-c.ctx.Done():
-		logging.Infof("Stop subscribe attempts due to context cancellation")
-		return false
-	case <-timer.C:
-		return c.currentConnGen() == gen
-	}
-}
-
-func backendMQTTReady() (bool, error) {
-	subscribing, err := lockHeld(mqttSubscribeLock)
-	if err != nil || !subscribing {
-		return false, err
-	}
-	starting, err := lockHeld(mqttRunLock)
-	if err != nil || starting {
-		return false, err
-	}
-	return true, nil
-}
-
-// lockHeld reads /proc/locks. Trying the lock from this process would
-// race with the backend's non-blocking acquire and could steal it.
-func lockHeld(path string) (bool, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
+	if err := c.subscribe(cm); err != nil && c.ctx.Err() == nil {
+		logging.Warningf("Failed to subscribe, reconnecting MQTT in %s: %v", reconnectBackoffDelay, err)
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-time.After(reconnectBackoffDelay):
 		}
-		return false, err
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return false, fmt.Errorf("cannot read inode of %s", path)
-	}
-	target := procLockID(stat)
-
-	data, err := os.ReadFile("/proc/locks")
-	if err != nil {
-		return false, err
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 6 && fields[1] == "FLOCK" && fields[5] == target {
-			return true, nil
+		if c.currentConnGen() == gen {
+			cm.TerminateConnectionForTest()
 		}
 	}
-	return false, nil
-}
-
-// procLockID is the device:inode key printed by /proc/locks.
-// Stat_t.Dev is a glibc dev_t, not major<<20|minor. Decoding it the
-// other way never matches the lock the backend holds.
-func procLockID(stat *syscall.Stat_t) string {
-	dev := stat.Dev
-	major := uint32((dev&0x00000000000fff00)>>8) |
-		uint32((dev&0xfffff00000000000)>>32)
-	minor := uint32(dev&0xff) |
-		uint32((dev&0x00000ffffff00000)>>12)
-	return fmt.Sprintf("%02x:%02x:%d", major, minor, stat.Ino)
-}
-
-func (c *MQTTClient) subscriptionTopic() string {
-	return fmt.Sprintf("%s/+/pepeunit", c.cfg.Domain)
 }
 
 func (c *MQTTClient) subscribe(cm *autopaho.ConnectionManager) error {
@@ -311,7 +193,7 @@ func (c *MQTTClient) subscribe(cm *autopaho.ConnectionManager) error {
 		return errors.New("mqtt connection manager is not initialized")
 	}
 
-	topic := c.subscriptionTopic()
+	topic := c.cfg.Domain + "/+"
 	ctx, cancel := context.WithTimeout(c.ctx, subscribeTimeout)
 	defer cancel()
 
@@ -319,7 +201,7 @@ func (c *MQTTClient) subscribe(cm *autopaho.ConnectionManager) error {
 		Subscriptions: []paho.SubscribeOptions{
 			{
 				Topic: topic,
-				QoS:   0,
+				QoS:   1,
 			},
 		},
 	})

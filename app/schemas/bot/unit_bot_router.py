@@ -26,8 +26,6 @@ from app.dto.enum import (
     CommandNames,
     DecreesNames,
     EntityNames,
-    GlobalPrefixTopic,
-    ReservedInputBaseTopic,
     UnitFirmwareUpdateStatus,
     VisibilityLevel,
 )
@@ -178,8 +176,8 @@ class UnitBotRouter(BaseBotRouter):
         self, callback: types.CallbackQuery, state: FSMContext
     ) -> None:
         filters = await self._get_filters(state, callback)
-        unit, selected_version, current_schema, is_creator = (
-            self._get_unit_data(callback)
+        unit, selected_version, commands, is_creator = self._get_unit_data(
+            callback
         )
 
         text = self._build_unit_info_text(unit, selected_version)
@@ -189,7 +187,7 @@ class UnitBotRouter(BaseBotRouter):
         text += "```"
 
         keyboard = self._build_keyboard(
-            unit, is_creator, current_schema, selected_version, filters
+            unit, is_creator, commands, selected_version, filters
         )
 
         await callback.answer(parse_mode="Markdown")
@@ -234,17 +232,17 @@ class UnitBotRouter(BaseBotRouter):
             except Exception:
                 selected_version = None
 
-            try:
-                current_schema = unit_service.get_current_schema(unit_uuid)
-            except Exception:
-                current_schema = None
-
             is_creator = (
                 unit_service.access_service.current_agent.uuid
                 == unit.creator_uuid
             )
+            commands = (
+                unit_service.unit_io_service.list_commands(unit_uuid)
+                if is_creator
+                else []
+            )
 
-        return unit, selected_version, current_schema, is_creator
+        return unit, selected_version, commands, is_creator
 
     def _build_unit_info_text(self, unit, selected_version):
         text = f"*Unit* - `{self.header_name_limit(unit.name)}` - *{unit.visibility_level}*\n```text\n"
@@ -393,7 +391,7 @@ class UnitBotRouter(BaseBotRouter):
         return "\n" + make_monospace_table_with_title(table, "Unit State")
 
     def _build_keyboard(
-        self, unit, is_creator, current_schema, selected_version, filters
+        self, unit, is_creator, commands, selected_version, filters
     ):
         keyboard = []
 
@@ -407,23 +405,14 @@ class UnitBotRouter(BaseBotRouter):
                 ]
             )
 
-            if current_schema:
-                commands = current_schema["input_base_topic"].keys()
-                command_mqtt_dict = {
-                    f"{ReservedInputBaseTopic.UPDATE.value}{GlobalPrefixTopic.BACKEND_SUB_PREFIX.value}": BackendTopicCommand.UPDATE.value,
-                    f"{ReservedInputBaseTopic.SCHEMA_UPDATE.value}{GlobalPrefixTopic.BACKEND_SUB_PREFIX.value}": BackendTopicCommand.SCHEMA_UPDATE.value,
-                    f"{ReservedInputBaseTopic.ENV_UPDATE.value}{GlobalPrefixTopic.BACKEND_SUB_PREFIX.value}": BackendTopicCommand.ENV_UPDATE.value,
-                    f"{ReservedInputBaseTopic.LOG_SYNC.value}{GlobalPrefixTopic.BACKEND_SUB_PREFIX.value}": BackendTopicCommand.LOG_SYNC.value,
-                    f"{ReservedInputBaseTopic.RESET.value}{GlobalPrefixTopic.BACKEND_SUB_PREFIX.value}": BackendTopicCommand.RESET.value,
-                }
-
+            if commands:
                 keyboard.append(
                     [
                         InlineKeyboardButton(
-                            text=command_mqtt_dict[command],
-                            callback_data=f"{self.entity_name}_decres_{command_mqtt_dict[command]}_{unit.uuid}",
+                            text=command.value,
+                            callback_data=f"{self.entity_name}_decres_{command.value}_{unit.uuid}",
                         )
-                        for command in list(commands)
+                        for command in commands
                     ]
                 )
 

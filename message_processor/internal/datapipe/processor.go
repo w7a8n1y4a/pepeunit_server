@@ -100,8 +100,10 @@ func (p *Processor) LoadNodeConfigs(ctx context.Context) error {
 }
 
 // StartConfigSync starts background processes for configuration synchronization
-func (p *Processor) StartConfigSync(ctx context.Context, redisDB *database.RedisDB) {
-	p.configs.StartConfigSync(ctx, p.postgresDB, redisDB, p.startSnapshotSync(ctx))
+func (p *Processor) StartConfigSync(ctx context.Context, redisDB *database.RedisDB) <-chan struct{} {
+	requests, ready := p.startSnapshotSync(ctx)
+	p.configs.StartConfigSync(ctx, p.postgresDB, redisDB, requests)
+	return ready
 }
 
 // Start starts the processor
@@ -137,20 +139,12 @@ func (p *Processor) getNodeState(ioUUID string) *NodeState {
 
 // ProcessMessage processes a message from a topic
 func (p *Processor) ProcessMessage(ctx context.Context, topic string, payload []byte) error {
-	if domain, ioUUID, ok := strings.Cut(topic, "/"); ok && !strings.Contains(ioUUID, "/") {
-		if domain != p.domain || uuid.Validate(ioUUID) != nil {
-			return apperr.New(apperr.InvalidTopic, "invalid UnitIO topic: %s", topic)
-		}
-		return p.processUnitIOMessage(ctx, ioUUID, payload, time.Now())
+	domain, address, found := strings.Cut(topic, "/")
+	ioUUID, err := uuid.Parse(address)
+	if !found || domain != p.domain || err != nil || ioUUID.String() != address {
+		return apperr.New(apperr.InvalidTopic, "invalid UnitIO topic: %s", topic)
 	}
-
-	// Extract the IO UUID from the topic
-	ioUUID := extractIOUUID(topic)
-	if ioUUID == "" {
-		return apperr.New(apperr.InvalidTopic, "invalid topic format: %s", topic)
-	}
-
-	return p.processDataPipe(ctx, ioUUID, payload, false)
+	return p.processUnitIOMessage(ctx, address, payload, time.Now())
 }
 
 func (p *Processor) processDataPipe(ctx context.Context, ioUUID string, payload []byte, raw bool) error {
@@ -233,14 +227,4 @@ func (p *Processor) processDataPipe(ctx context.Context, ioUUID string, payload 
 	}
 
 	return nil
-}
-
-// extractIOUUID extracts the IO UUID from a topic
-func extractIOUUID(topic string) string {
-	// Topic format: pu_dp_domain/io_uuid
-	parts := strings.Split(topic, "/")
-	if len(parts) != 3 {
-		return ""
-	}
-	return parts[1]
 }

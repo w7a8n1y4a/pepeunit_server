@@ -8,7 +8,7 @@ from fastapi.security import APIKeyHeader
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from app import settings
-from app.dto.enum import GlobalPrefixTopic, VisibilityLevel
+from app.dto.enum import VisibilityLevel
 
 
 def token_depends(
@@ -29,8 +29,7 @@ def remove_none_value_dict(data: dict) -> dict:
 
 
 def get_topic_name(io_uuid: uuid_pkg.UUID) -> str:
-    suffix = GlobalPrefixTopic.BACKEND_SUB_PREFIX.value
-    return f"{settings.pu_domain}/{io_uuid}{suffix}"
+    return f"{settings.pu_domain}/{io_uuid}"
 
 
 def get_visibility_level_priority(visibility_level: VisibilityLevel) -> int:

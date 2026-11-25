@@ -57,7 +57,6 @@ class Unit(SQLModel, table=True):
     # is_compilable_unit, otherwise the branch head.
     is_auto_update_unit: bool = Field(nullable=False, default=True)
 
-    # Compiled firmware uses tags only. The archive contains env and schema.
     is_compilable_unit: bool = Field(nullable=False, default=False)
 
     # With is_auto_update_unit, follow the last tag instead of the branch head.

@@ -90,7 +90,7 @@ def test_error_code_catalog_is_computed_once_and_lists_every_code():
     assert ErrorCode.not_found["User"] is ErrorCode.USER_NOT_FOUND
     assert ErrorCode.uuid_invalid["Unit"] is ErrorCode.UNIT_UUID_INVALID
     assert (
-        ErrorCode.json_invalid["env.json"]
+        ErrorCode.json_invalid["Unit settings"]
         is ErrorCode.GIT_REPO_ENV_JSON_INVALID
     )
 

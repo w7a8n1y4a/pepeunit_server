@@ -1,16 +1,20 @@
 import logging
 import os
 import uuid as uuid_pkg
+from typing import Literal
 
 import yaml
 from fastapi import APIRouter, Depends, status
 from starlette.background import BackgroundTask
 from starlette.responses import FileResponse, PlainTextResponse, Response
 
-from app.configs.clickhouse import get_hand_clickhouse_client
 from app.configs.db import get_hand_session
 from app.configs.rest import get_unit_service
-from app.dto.enum import AgentType, BackendTopicCommand, StaticRepoFileName
+from app.dto.enum import (
+    AgentType,
+    BackendTopicCommand,
+    StaticRepoFileName,
+)
 from app.schemas.pydantic.shared import MqttRead
 from app.schemas.pydantic.unit import (
     EnvJsonString,
@@ -104,13 +108,6 @@ def get_io_topics(
     )
 
 
-@router.get("/get_current_schema/{uuid}", response_model=dict)
-def get_current_schema(
-    uuid: uuid_pkg.UUID, unit_service: UnitService = Depends(get_unit_service)
-):
-    return unit_service.get_current_schema(uuid)
-
-
 @router.get("/firmware/zip/{uuid}", response_model=bytes)
 def get_firmware_zip(
     uuid: uuid_pkg.UUID, unit_service: UnitService = Depends(get_unit_service)
@@ -169,11 +166,15 @@ def get_state_storage(
 
 
 @router.post("/auth", response_model=MqttRead, status_code=status.HTTP_200_OK)
-def get_mqtt_auth(data: UnitMqttTokenAuth):
-    with get_hand_session() as db, get_hand_clickhouse_client() as cc:
+def get_mqtt_auth(
+    data: UnitMqttTokenAuth, action: Literal["publish", "subscribe"]
+) -> MqttRead:
+    with get_hand_session() as db:
         try:
-            unit_service = get_unit_service(db, cc, data.token)
-            unit_service.get_mqtt_auth(data.topic)
+            unit_service = get_unit_service(db, None, data.token)
+            unit_service.get_mqtt_auth(
+                data.topic, is_subscribe=action == "subscribe"
+            )
         except Exception as e:
             logging.info(repr(e))
             return MqttRead(result="deny")

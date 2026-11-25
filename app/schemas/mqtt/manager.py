@@ -1,181 +1,104 @@
-import asyncio
-import concurrent.futures
 import json
 import logging
-import time
+import uuid as uuid_pkg
 
-from fastapi_mqtt import FastMQTT, MQTTConfig
+from paho.mqtt import client as mqtt
 
 from app import runtime, settings
 from app.configs.error_codes import ErrorCode
 from app.configs.errors import MqttError
-from app.configs.utils import acquire_file_lock
 from app.dto.agent.abc import AgentBackend
-from app.dto.enum import FileLock, GlobalPrefixTopic
+from app.dto.enum import MqttQos
 
 
 class MqttManager:
+    RECONNECT_DELAY = 6
+
     def __init__(self) -> None:
-        mqtt_config = MQTTConfig(
-            host=settings.pu_mqtt_host,
-            port=settings.pu_mqtt_port,
-            keepalive=runtime.get().pu_mqtt_keepalive,
-            username=AgentBackend(
-                name=settings.pu_domain
-            ).generate_agent_token(),
+        self.client: mqtt.Client | None = None
+
+    def start(self) -> None:
+        if self.client is not None:
+            return
+
+        client = mqtt.Client(
+            mqtt.CallbackAPIVersion.VERSION2,
+            client_id=uuid_pkg.uuid4().hex,
+            protocol=mqtt.MQTTv5,
+        )
+        client.username_pw_set(
+            AgentBackend(name=settings.pu_domain).generate_agent_token(),
             password="",
-            reconnect_retries=-1,
-            reconnect_delay=6,
         )
-        self.mqtt = FastMQTT(config=mqtt_config)
+        client.reconnect_delay_set(self.RECONNECT_DELAY, self.RECONNECT_DELAY)
+        client.enable_logger()
 
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._connected: bool = False
-        self._watchdog_task: asyncio.Task | None = None
-        self._last_resubscribe_monotonic: float = 0.0
-        self._subscription_lock_fd = None
-
-    def attach_loop(self, loop: asyncio.AbstractEventLoop) -> None:
-        self._loop = loop
-
-    def get_loop(self) -> asyncio.AbstractEventLoop | None:
-        return self._loop
-
-    def is_connected(self) -> bool:
-        return (
-            bool(getattr(self.mqtt.client, "is_connected", False))
-            or self._connected
+        host, port = settings.pu_mqtt_host, settings.pu_mqtt_port
+        logging.info("Connect to MQTT broker %s:%s", host, port)
+        client.connect_async(
+            host,
+            port,
+            keepalive=runtime.get().pu_mqtt_keepalive,
+            clean_start=True,
         )
-
-    def on_connect(self, client, _flags, _rc, _properties) -> None:
-        try:
-            self._loop = asyncio.get_running_loop()
-        except RuntimeError:
-            logging.error(
-                "MQTT on_connect called without running asyncio loop"
-            )
-            return
-        self._connected = True
-
-        async def _subscribe_after_connect() -> None:
-            lock_fd = self._subscription_lock_fd or acquire_file_lock(
-                FileLock.MQTT_SUBSCRIBE
-            )
-            await asyncio.sleep(2)
-            if not lock_fd:
-                logging.info(
-                    "Another worker already subscribed to MQTT topics"
-                )
-                return
-
-            self._subscription_lock_fd = lock_fd
-            logging.info("MQTT subscriptions initialized in this worker")
-            try:
-                client.subscribe(
-                    f"{settings.pu_domain}/+/+/+{GlobalPrefixTopic.BACKEND_SUB_PREFIX.value}"
-                )
-                self._last_resubscribe_monotonic = time.monotonic()
-            except Exception:
-                try:
-                    lock_fd.close()
-                finally:
-                    self._subscription_lock_fd = None
-                raise
-
-        loop = self._loop
-        loop.create_task(_subscribe_after_connect())
-        if self._watchdog_task is None or self._watchdog_task.done():
-            self._watchdog_task = loop.create_task(self._watchdog())
-
-    def release_subscription_lock(self) -> None:
-        lock_fd = self._subscription_lock_fd
-        self._subscription_lock_fd = None
-        if lock_fd is not None:
-            lock_fd.close()
-
-    def on_disconnect(self, _client, _packet) -> None:
-        self._connected = False
-        logging.info(
-            "Disconnected from MQTT server: %s:%s",
-            settings.pu_mqtt_host,
-            settings.pu_mqtt_port,
-        )
-
-    async def _watchdog(self) -> None:
-        interval = 5
-        resubscribe_interval = 120
-
-        while True:
-            await asyncio.sleep(interval)
-            try:
-                gmqtt_client = self.mqtt.client
-                conn = getattr(gmqtt_client, "_connection", None)
-                if conn is None or conn.is_closing():
-                    continue
-
-                # keepalive pings and reconnects on a dead link are handled by
-                # MQTTConnection._keep_connection with pu_mqtt_keepalive
-                now = time.monotonic()
-
-                if (
-                    self._subscription_lock_fd is not None
-                    and (now - self._last_resubscribe_monotonic)
-                    >= resubscribe_interval
-                ):
-                    try:
-                        gmqtt_client.subscribe(
-                            f"{settings.pu_domain}/+/+/+{GlobalPrefixTopic.BACKEND_SUB_PREFIX.value}"
-                        )
-                        self._last_resubscribe_monotonic = now
-                    except Exception as e:
-                        logging.warning(
-                            f"MQTT watchdog resubscribe failed: {e}"
-                        )
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logging.error(f"MQTT watchdog error: {e}")
-
-    def publish(self, topic: str, msg: dict | str | bytes) -> None:
-        payload = json.dumps(msg) if isinstance(msg, dict) else msg
-
-        if self._loop is None:
-            msg = f"Error when publish message to topic {topic}: MQTT loop is not initialized"
+        result = client.loop_start()
+        if result != mqtt.MQTT_ERR_SUCCESS:
+            message = f"Cannot start MQTT client: {mqtt.error_string(result)}"
             raise MqttError(
-                msg, code=ErrorCode.MQTT_PUBLISH_LOOP_NOT_INITIALIZED
+                message, code=ErrorCode.MQTT_PUBLISH_LOOP_NOT_INITIALIZED
             )
 
-        if not self.is_connected():
-            msg = f"Error when publish message to topic {topic}: MQTT client is disconnected"
-            raise MqttError(msg, code=ErrorCode.MQTT_PUBLISH_DISCONNECTED)
+        self.client = client
 
-        try:
-            running_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            running_loop = None
-
-        if running_loop is self._loop:
-            self.mqtt.publish(topic, payload)
+    def stop(self) -> None:
+        client = self.client
+        if client is None:
             return
+        self.client = None
 
-        fut: concurrent.futures.Future[None] = concurrent.futures.Future()
-
-        def _do_publish() -> None:
-            try:
-                self.mqtt.publish(topic, payload)
-                fut.set_result(None)
-            except Exception as e:
-                fut.set_exception(e)
-
-        self._loop.call_soon_threadsafe(_do_publish)
         try:
-            fut.result(timeout=5)
-        except concurrent.futures.TimeoutError as err:
-            msg = f"Error when publish message to topic {topic}: publish timed out (MQTT loop busy or stopped)"
-            raise MqttError(msg, code=ErrorCode.MQTT_PUBLISH_TIMEOUT) from err
-        except Exception as err:
-            msg = f"Error when publish message to topic {topic}: {err}"
-            raise MqttError(msg, code=ErrorCode.MQTT_PUBLISH_FAILED) from err
+            client.disconnect()
+        finally:
+            client.loop_stop()
+
+    def publish(
+        self, topic: str, msg: dict | str | bytes, qos: MqttQos
+    ) -> None:
+        client = self.client
+        if client is None:
+            message = f"Cannot publish to {topic}: MQTT client is not started"
+            raise MqttError(
+                message, code=ErrorCode.MQTT_PUBLISH_LOOP_NOT_INITIALIZED
+            )
+
+        disconnected = (
+            f"Cannot publish to {topic}: MQTT client is disconnected"
+        )
+        if not client.is_connected():
+            raise MqttError(
+                disconnected, code=ErrorCode.MQTT_PUBLISH_DISCONNECTED
+            )
+
+        try:
+            payload = json.dumps(msg) if isinstance(msg, dict) else msg
+            result = client.publish(topic, payload, qos=qos.value).rc
+        except Exception as error:
+            message = f"Cannot publish to {topic}: {error}"
+            raise MqttError(
+                message, code=ErrorCode.MQTT_PUBLISH_FAILED
+            ) from error
+
+        if result == mqtt.MQTT_ERR_SUCCESS:
+            return
+        if result == mqtt.MQTT_ERR_NO_CONN:
+            if qos == MqttQos.AT_LEAST_ONCE:
+                return
+            raise MqttError(
+                disconnected, code=ErrorCode.MQTT_PUBLISH_DISCONNECTED
+            )
+
+        message = f"Cannot publish to {topic}: {mqtt.error_string(result)}"
+        raise MqttError(message, code=ErrorCode.MQTT_PUBLISH_FAILED)
 
 
 mqtt_manager = MqttManager()

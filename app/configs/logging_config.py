@@ -121,30 +121,6 @@ class UvicornAccessFilter(logging.Filter):
         return True
 
 
-class GmqttPacketIdMaskFilter(logging.Filter):
-    _pattern = re.compile(r"(\[[A-Z0-9 _-]+\])\s+\d+\b")
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        name = getattr(record, "name", None)
-        if not isinstance(name, str) or not name.startswith("gmqtt"):
-            return True
-
-        try:
-            msg = record.getMessage()
-        except Exception:
-            return True
-
-        if not isinstance(msg, str):
-            return True
-
-        masked = self._pattern.sub(r"\1 N", msg)
-        if masked != msg:
-            record.msg = masked
-            record.args = ()
-
-        return True
-
-
 def _build_formatters(log_format: str) -> dict:
     if log_format == LogFormat.PLAIN.value:
         plain_format = "%(levelname)s - %(asctime)s - %(name)s - %(message)s"
@@ -241,16 +217,13 @@ def _build_logging_config(
             "uvicorn_access": {
                 "()": "app.configs.logging_config.UvicornAccessFilter",
             },
-            "gmqtt_mask_packet_id": {
-                "()": "app.configs.logging_config.GmqttPacketIdMaskFilter",
-            },
         },
         "formatters": _build_formatters(log_format),
         "handlers": {
             "stdout": {
                 "class": "logging.StreamHandler",
                 "formatter": formatter_name,
-                "filters": ["uvicorn_access", "gmqtt_mask_packet_id"],
+                "filters": ["uvicorn_access"],
             },
         },
         "root": {

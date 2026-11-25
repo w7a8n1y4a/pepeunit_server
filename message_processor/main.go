@@ -96,12 +96,19 @@ func main() {
 	processor.Start(ctx)
 	defer processor.Stop()
 
-	if err := mqttClient.Connect(); err != nil {
+	select {
+	case <-processor.StartConfigSync(ctx, redisDB):
+	case <-ctx.Done():
+		return
+	}
+
+	defer mqttClient.Disconnect()
+	if err := mqttClient.Connect(ctx); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		logging.Fatalf("Failed to connect to MQTT broker: %v", err)
 	}
-	defer mqttClient.Disconnect()
-
-	processor.StartConfigSync(ctx, redisDB)
 
 	reloadCtx, requestReload := context.WithCancel(context.Background())
 	defer requestReload()

@@ -4,7 +4,6 @@ from datetime import UTC, datetime
 from fastapi import Depends
 from fastapi.params import Query
 from sqlalchemy import func
-from sqlalchemy.orm import aliased
 from sqlmodel import Session, select
 
 from app.configs.db import get_session
@@ -97,45 +96,6 @@ class UnitIORepository(BaseRepository):
             (direction, name): io_uuid
             for io_uuid, direction, name in self.db.exec(statement)
         }
-
-    def get_nodes_with_links(self, unit_uuid: uuid_pkg.UUID) -> list[tuple]:
-        link_alias = aliased(Link)
-        unit_io_alias = aliased(UnitIO)
-
-        link_subquery = (
-            self.db.query(
-                func.json_agg(
-                    func.json_build_array(
-                        link_alias.output_uuid,
-                        unit_io_alias.topic_name,
-                    )
-                ).label("test")
-            )
-            .select_from(link_alias)
-            .join(
-                unit_io_alias,
-                link_alias.output_uuid == unit_io_alias.uuid,
-            )
-            .filter(link_alias.input_uuid == UnitIO.uuid)
-        )
-
-        return (
-            self.db.query(
-                UnitIO.uuid,
-                UnitIO.topic_name,
-                UnitIO.type,
-                link_subquery.label("links"),
-            )
-            .select_from(Link)
-            .outerjoin(
-                UnitIO,
-                Link.input_uuid == UnitIO.uuid,
-                full=True,
-            )
-            .filter(UnitIO.unit_uuid == unit_uuid)
-            .group_by(UnitIO.uuid, UnitIO.topic_name, UnitIO.type)
-            .all()
-        )
 
     def list(
         self, filters: UnitIOFilter, restriction: list[str] = None

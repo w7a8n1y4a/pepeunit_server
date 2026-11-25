@@ -7,8 +7,10 @@ import json
 import logging
 import os
 import shutil
+import tempfile
 import uuid as uuid_pkg
 import zlib
+from pathlib import Path
 
 from fastapi import Depends
 from pydantic import JsonValue, ValidationError
@@ -33,9 +35,8 @@ from app.dto.clickhouse.log import UnitLog
 from app.dto.enum import (
     AgentType,
     BackendTopicCommand,
-    DestinationTopicType,
     FieldKey,
-    GlobalPrefixTopic,
+    FirmwareArchiveFormat,
     JsonPayload,
     LogLevel,
     MqttQos,
@@ -58,7 +59,6 @@ from app.repositories.repo_repository import (
 from app.repositories.unit_io_repository import UnitIORepository
 from app.repositories.unit_log_repository import UnitLogRepository
 from app.repositories.unit_repository import UnitRepository
-from app.schemas.mqtt.utils import get_topic_split
 from app.schemas.pydantic.operation_task import OperationTaskCreate
 from app.schemas.pydantic.shared import UnitIORead
 from app.schemas.pydantic.unit import (
@@ -383,7 +383,7 @@ class UnitService:
             repo, selected_commit
         )
         submitted = self.require_env_object(
-            is_valid_json(env_json_str, JsonPayload.ENV)
+            is_valid_json(env_json_str, JsonPayload.UNIT_ENV)
         )
         env = self.generate_unified_env(
             unit, manifest, dictionary, selected_commit, submitted
@@ -441,37 +441,26 @@ class UnitService:
                     msg = f"UnitIO {direction.value} {name!r} is missing for commit {selected_commit}"
                     raise UnitIOError(msg, code=ErrorCode.UNIT_IO_NOT_FOUND)
                 entries[name] = UnitIOTopicRead(
-                    topic=f"{settings.pu_domain}/{io_uuid}",
+                    topic=get_topic_name(io_uuid),
                     qos=MqttQos(field[FieldKey.QOS]),
                 )
         return topics
 
-    def get_current_schema(self, uuid: uuid_pkg.UUID) -> dict:
-        unit, selected_commit, manifest, dictionary = (
-            self.read_owned_unit_manifest(uuid)
-        )
-        return self.generate_current_schema(
-            unit, selected_commit, manifest, dictionary
-        )
-
-    def get_unit_firmware(self, uuid: uuid_pkg.UUID) -> str:
+    def get_unit_firmware(self, uuid: uuid_pkg.UUID) -> Path:
         self.access_service.authorization.check_access(
             [AgentType.USER, AgentType.UNIT]
         )
-
         unit = self.unit_repository.get(Unit(uuid=uuid))
-
+        is_valid_object(unit, NotFoundEntity.UNIT)
         self.access_service.authorization.check_ownership(
             unit, [OwnershipType.CREATOR, OwnershipType.UNIT]
         )
 
         repo = self.repo_repository.get(Repo(uuid=unit.repo_uuid))
         is_valid_object(repo, NotFoundEntity.REPO)
-
         selected_commit, _ = (
             self.git_repo_repository.get_selected_commit_and_tag(repo, unit)
         )
-
         manifest, dictionary = self.unit_manifest_service.read_from_commit(
             repo, selected_commit
         )
@@ -480,52 +469,48 @@ class UnitService:
         )
         self.validate_env(manifest, dictionary, env_dict)
 
-        new_schema_dict = self.generate_current_schema(
-            unit, selected_commit, manifest, dictionary
-        )
-
-        gen_uuid = uuid_pkg.uuid4()
-
-        if unit.is_compilable_unit:
-            tmp_git_repo_path = self.git_repo_repository.get_tmp_path(gen_uuid)
-            os.mkdir(tmp_git_repo_path)
-        else:
-            tmp_git_repo_path = self.git_repo_repository.generate_tmp_git_repo(
-                repo, selected_commit, gen_uuid
+        firmware = Path(tempfile.mkdtemp(dir="tmp"))
+        try:
+            if not unit.is_compilable_unit:
+                self.git_repo_repository.checkout_firmware_sources(
+                    repo, selected_commit, firmware
+                )
+            env_path = firmware / StaticRepoFileName.ENV
+            if env_path.is_dir() and not env_path.is_symlink():
+                shutil.rmtree(env_path)
+            else:
+                env_path.unlink(missing_ok=True)
+            env_path.write_text(
+                UnitEnvSerializer.serialize(env_dict),
+                encoding="utf-8",
+                newline="\n",
             )
+        except Exception:
+            shutil.rmtree(firmware, ignore_errors=True)
+            raise
+        return firmware
 
-        with open(
-            f"{tmp_git_repo_path}/{StaticRepoFileName.ENV.value}",
-            "w",
-            encoding="utf-8",
-            newline="\n",
-        ) as f:
-            f.write(UnitEnvSerializer.serialize(env_dict))
-
-        with open(
-            f"{tmp_git_repo_path}/{StaticRepoFileName.SCHEMA.value}", "w"
-        ) as f:
-            f.write(json.dumps(new_schema_dict, indent=4))
-
-        return tmp_git_repo_path
+    def archive_firmware(
+        self, uuid: uuid_pkg.UUID, archive_format: FirmwareArchiveFormat
+    ) -> str:
+        firmware = self.get_unit_firmware(uuid)
+        try:
+            return shutil.make_archive(
+                str(firmware), archive_format.value, firmware
+            )
+        except Exception:
+            firmware.with_suffix(f".{archive_format.value}").unlink(
+                missing_ok=True
+            )
+            raise
+        finally:
+            shutil.rmtree(firmware, ignore_errors=True)
 
     def get_unit_firmware_zip(self, uuid: uuid_pkg.UUID) -> str:
-        firmware_path = self.get_unit_firmware(uuid)
-        firmware_zip_path = f"tmp/{uuid}"
-
-        shutil.make_archive(firmware_zip_path, "zip", firmware_path)
-        shutil.rmtree(firmware_path, ignore_errors=True)
-
-        return f"{firmware_zip_path}.zip"
+        return self.archive_firmware(uuid, FirmwareArchiveFormat.ZIP)
 
     def get_unit_firmware_tar(self, uuid: uuid_pkg.UUID) -> str:
-        firmware_path = self.get_unit_firmware(uuid)
-        firmware_tar_path = f"tmp/{uuid}"
-
-        shutil.make_archive(firmware_tar_path, "tar", firmware_path)
-        shutil.rmtree(firmware_path, ignore_errors=True)
-
-        return f"{firmware_tar_path}.tar"
+        return self.archive_firmware(uuid, FirmwareArchiveFormat.TAR)
 
     def get_unit_firmware_tgz(
         self, uuid: uuid_pkg.UUID, wbits: int = 15, level: int = 9
@@ -533,23 +518,19 @@ class UnitService:
         self.is_valid_wbits(wbits)
         self.is_valid_level(level)
 
-        firmware_path = self.get_unit_firmware(uuid)
-        firmware_tar_path = f"tmp/{uuid}"
-
-        shutil.make_archive(firmware_tar_path, "tar", firmware_path)
-        shutil.rmtree(firmware_path, ignore_errors=True)
-
-        with open(firmware_tar_path + ".tar", "rb") as tar_file:
+        tar_path = Path(self.get_unit_firmware_tar(uuid))
+        tgz_path = tar_path.with_suffix(".tgz")
+        try:
             producer = zlib.compressobj(wbits=wbits, level=level)
-
-            tar_data = producer.compress(tar_file.read()) + producer.flush()
-
-            with open(f"{firmware_tar_path}.tgz", "wb") as tgz:
-                tgz.write(tar_data)
-
-        os.remove(firmware_tar_path + ".tar")
-
-        return f"{firmware_tar_path}.tgz"
+            tgz_path.write_bytes(
+                producer.compress(tar_path.read_bytes()) + producer.flush()
+            )
+        except Exception:
+            tgz_path.unlink(missing_ok=True)
+            raise
+        finally:
+            tar_path.unlink()
+        return str(tgz_path)
 
     def set_state_storage(self, uuid: uuid_pkg.UUID, state: str) -> None:
         self.access_service.authorization.check_access(
@@ -587,65 +568,47 @@ class UnitService:
             else ""
         )
 
-    def get_mqtt_auth(self, topic: str) -> None:
+    def get_mqtt_auth(self, topic: str, *, is_subscribe: bool) -> None:
         self.access_service.authorization.check_access(
             [AgentType.BACKEND, AgentType.UNIT]
         )
 
-        if isinstance(
-            self.access_service.current_agent, AgentUnit | AgentBackend
+        agent = self.access_service.current_agent
+        is_backend = isinstance(agent, AgentBackend)
+        domain, separator, address = topic.partition("/")
+        if domain != settings.pu_domain or (
+            is_backend and agent.name != domain
         ):
-            struct_topic = get_topic_split(topic)
+            msg = "MQTT topic belongs to another instance"
+            raise MqttError(msg, code=ErrorCode.MQTT_TOPIC_DOMAIN)
+        if not separator or not address or "/" in address:
+            msg = "MQTT topic must contain exactly two levels"
+            raise MqttError(msg, code=ErrorCode.MQTT_TOPIC_STRUCT)
 
-            len_struct = len(struct_topic)
-            if len_struct == 5:
-                if isinstance(self.access_service.current_agent, AgentBackend):
-                    return
+        if is_backend and address == "+" and is_subscribe:
+            return
 
-                backend_domain, destination, unit_uuid, topic_name, *_ = (
-                    struct_topic
-                )
-                unit_uuid = is_valid_uuid(unit_uuid, UuidEntity.UNIT)
+        io_uuid = is_valid_uuid(address, UuidEntity.UNIT_IO)
+        if address != str(io_uuid):
+            msg = "MQTT topic must contain a canonical UnitIO UUID"
+            raise MqttError(msg, code=ErrorCode.MQTT_TOPIC_STRUCT)
+        unit_io = self.unit_io_repository.get(UnitIO(uuid=io_uuid))
+        is_valid_object(unit_io, NotFoundEntity.UNIT_IO)
 
-                if destination in [
-                    DestinationTopicType.INPUT_BASE_TOPIC,
-                    DestinationTopicType.OUTPUT_BASE_TOPIC,
-                ]:
-                    if self.access_service.current_agent.uuid != unit_uuid:
-                        msg = "Available only for a docked Unit"
-                        raise NoAccessError(
-                            msg, code=ErrorCode.ACCESS_DOCKED_UNIT_ONLY
-                        )
-                else:
-                    msg = f"Topic destination {destination} is invalid, available {list(DestinationTopicType)}"
-                    raise NoAccessError(
-                        msg, code=ErrorCode.ACCESS_TOPIC_DESTINATION_INVALID
-                    )
+        if isinstance(agent, AgentUnit) and unit_io.unit_uuid != agent.uuid:
+            msg = "MQTT topic belongs to another Unit"
+            raise NoAccessError(msg, code=ErrorCode.ACCESS_DOCKED_UNIT_ONLY)
 
-            elif len_struct in [2, 3]:
-                backend_domain, unit_io_uuid, *_ = struct_topic
-
-                if (
-                    unit_io_uuid == "+"
-                    and self.access_service.current_agent.type
-                    == AgentType.BACKEND
-                ):
-                    return
-
-                unit_io_uuid = is_valid_uuid(unit_io_uuid, UuidEntity.UNIT_IO)
-
-                unit_io = self.unit_io_repository.get(
-                    UnitIO(uuid=unit_io_uuid)
-                )
-                is_valid_object(unit_io, NotFoundEntity.UNIT_IO)
-
-                self.access_service.authorization.check_visibility(unit_io)
-            else:
-                msg = f"Topic struct is invalid, len {len_struct}, available - [2, 3]"
-                raise MqttError(msg, code=ErrorCode.MQTT_TOPIC_STRUCT)
-        else:
-            msg = "Only for Unit available topic communication"
-            raise MqttError(msg, code=ErrorCode.MQTT_UNIT_TOPIC_ONLY)
+        allowed_direction = (
+            UnitIOTypeEnum.INPUT
+            if is_backend or is_subscribe
+            else UnitIOTypeEnum.OUTPUT
+        )
+        if unit_io.type != allowed_direction or (is_backend and is_subscribe):
+            msg = "MQTT action is forbidden for this topic"
+            raise NoAccessError(
+                msg, code=ErrorCode.ACCESS_TOPIC_DESTINATION_INVALID
+            )
 
     def delete(self, uuid: uuid_pkg.UUID) -> None:
         self.access_service.authorization.check_access([AgentType.USER])
@@ -782,62 +745,6 @@ class UnitService:
 
         self.operation_task_service.schedule(task, operation)
         return task
-
-    def generate_current_schema(
-        self,
-        unit: Unit,
-        selected_commit: str,
-        manifest: UnitDefinition,
-        dictionary: ManifestDictionary,
-    ) -> dict:
-        addresses = {}
-        for (
-            io_uuid,
-            name,
-            direction,
-            links,
-        ) in self.unit_io_repository.get_nodes_with_links(unit.uuid):
-            addresses[direction, name] = [
-                get_topic_name(io_uuid),
-                *(get_topic_name(link_uuid) for link_uuid, _ in (links or ())),
-            ]
-
-        schema = {destination: {} for destination in DestinationTopicType}
-        for (
-            direction,
-            declarations,
-            reserved,
-            base_destination,
-            custom_destination,
-        ) in (
-            (
-                UnitIOTypeEnum.INPUT,
-                manifest.input,
-                dictionary.input,
-                DestinationTopicType.INPUT_BASE_TOPIC,
-                DestinationTopicType.INPUT_TOPIC,
-            ),
-            (
-                UnitIOTypeEnum.OUTPUT,
-                manifest.output,
-                dictionary.output,
-                DestinationTopicType.OUTPUT_BASE_TOPIC,
-                DestinationTopicType.OUTPUT_TOPIC,
-            ),
-        ):
-            for name in declarations:
-                if name in reserved:
-                    topic = name + GlobalPrefixTopic.BACKEND_SUB_PREFIX.value
-                    schema[base_destination][topic] = [
-                        f"{settings.pu_domain}/{base_destination.value}/{unit.uuid}/{topic}"
-                    ]
-                    continue
-                topics = addresses.get((direction, name))
-                if topics is None:
-                    msg = f"UnitIO {direction.value} {name!r} is missing for commit {selected_commit}"
-                    raise UnitIOError(msg, code=ErrorCode.UNIT_IO_NOT_FOUND)
-                schema[custom_destination][name] = topics
-        return schema
 
     def generate_token(self, uuid: uuid_pkg.UUID) -> str:
         unit = self.unit_repository.get(Unit(uuid=uuid))

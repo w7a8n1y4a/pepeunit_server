@@ -688,19 +688,6 @@ wheels = [
 ]
 
 [[package]]
-name = "fastapi-mqtt"
-version = "2.2.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "gmqtt" },
-    { name = "pydantic" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/2b/fd/2eb9400ac35f1cad795d76688e801e43f1a48c2bf869ee856bac16a1b921/fastapi_mqtt-2.2.0.tar.gz", hash = "sha256:68308fe47c068b4d2146b3eb10aa198fa08d827aa3dc3d081dd5821e53090b2b", size = 9572, upload-time = "2024-05-22T08:59:07.231Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/94/6e/01ee90c935f0eb52e69eac18baf7f8ef14f926d9cc2c04b52df1cba07b17/fastapi_mqtt-2.2.0-py3-none-any.whl", hash = "sha256:1bb5e5cca39457c72d9cd0e36b56817923f49ee1a9605fe8dbad36d5ce450c36", size = 9288, upload-time = "2024-05-22T08:59:04.621Z" },
-]
-
-[[package]]
 name = "fastapi-utilities"
 version = "0.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -931,15 +918,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c0/ff/fee293f1ec3e1b64db6eb270e00964f29c086d769201474cedb8d1608930/gitpython-3.2.1.tar.gz", hash = "sha256:0f1229ec5c057bdabdeeda8bda4f17bda679ab33dbccc00f24e6a480553c8613", size = 241688, upload-time = "2026-10-14T12:20:20.589Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/6b/50/2a923c4dc02522ff9567f07c67ed1deca6d5fa9474f4708168b8088dfa37/gitpython-3.2.1-py3-none-any.whl", hash = "sha256:d66b0832aa8755c1a84892937282df0befb16c97e5a64aeebd68be9c5e323f53", size = 231548, upload-time = "2026-10-14T12:20:18.844Z" },
-]
-
-[[package]]
-name = "gmqtt"
-version = "0.8.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/cf/12/bffb634a05bb12a9cb64fdce6e26854f11e3eff56a06c59021af52868d7f/gmqtt-0.8.0.tar.gz", hash = "sha256:61fb7641109f57ca29f73d2d8f2cb487de49d76338ef8c68228db961b6e9696a", size = 44696, upload-time = "2026-10-08T09:24:27.069Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/83/31/50c7313a004e4b6168a4ed3faf823921b79403910a8bf06982399d3844cc/gmqtt-0.8.0-py3-none-any.whl", hash = "sha256:bd40fa51147b929486628f4f9d473b6e5f19132019345645600641a7063d7a5b", size = 37679, upload-time = "2026-10-08T09:24:25.736Z" },
 ]
 
 [[package]]
@@ -1430,7 +1408,6 @@ dependencies = [
     { name = "dill" },
     { name = "fastapi" },
     { name = "fastapi-filter" },
-    { name = "fastapi-mqtt" },
     { name = "fastapi-utilities" },
     { name = "filetype" },
     { name = "gitpython" },
@@ -1490,7 +1467,6 @@ requires-dist = [
     { name = "dill", specifier = ">=0.3.8" },
     { name = "fastapi", specifier = ">=0.95.0" },
     { name = "fastapi-filter", specifier = ">=0.6.0" },
-    { name = "fastapi-mqtt", specifier = ">=1.2.0" },
     { name = "fastapi-utilities", specifier = ">=0.2.0" },
     { name = "filetype", specifier = ">=1.2.0" },
     { name = "gitpython", specifier = ">=3.1.40" },

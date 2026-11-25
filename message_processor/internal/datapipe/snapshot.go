@@ -36,22 +36,31 @@ type Snapshot struct {
 	selectedCommits map[uuid.UUID]string
 }
 
-func (p *Processor) startSnapshotSync(ctx context.Context) chan<- struct{} {
+func (p *Processor) startSnapshotSync(ctx context.Context) (chan<- struct{}, <-chan struct{}) {
 	requests := make(chan struct{}, 1)
+	ready := make(chan struct{})
 	requests <- struct{}{}
 	go func() {
+		loaded := false
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-requests:
-				if err := p.LoadSnapshot(ctx); err != nil && ctx.Err() == nil {
-					logging.Errorf("Failed to reload MessageProcessor schemas: %v", err)
+				if err := p.LoadSnapshot(ctx); err != nil {
+					if ctx.Err() == nil {
+						logging.Errorf("Failed to reload MessageProcessor schemas: %v", err)
+					}
+					continue
+				}
+				if !loaded {
+					close(ready)
+					loaded = true
 				}
 			}
 		}
 	}()
-	return requests
+	return requests, ready
 }
 
 func (p *Processor) LoadSnapshot(ctx context.Context) error {

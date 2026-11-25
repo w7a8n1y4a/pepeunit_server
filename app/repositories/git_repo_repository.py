@@ -1,9 +1,10 @@
 import contextlib
 import os
 import shutil
-import uuid as uuid_pkg
+import tempfile
+from pathlib import Path
 
-from git import Blob
+from git import Blob, Git
 from git import Repo as GitRepo
 from git.exc import BadName, BadObject, GitCommandError
 
@@ -17,6 +18,7 @@ from app.dto.enum import (
     GitPlatform,
     JsonPayload,
     NotFoundEntity,
+    StaticRepoFileName,
 )
 from app.repositories.git_platform_repository import (
     GithubPlatformClient,
@@ -84,7 +86,7 @@ class GitRepoRepository:
         for remote in git_repo.remotes:
             remote.fetch()
 
-    def _cloning_url(self, repo: Repo) -> str:
+    def get_cloning_url(self, repo: Repo) -> str:
         credentials = None
         if not repo.is_public_repository:
             credentials_map = repo.get_credentials() or {}
@@ -113,21 +115,31 @@ class GitRepoRepository:
             if os.path.isdir(os.path.join(path, name))
         ]
 
-    def generate_tmp_git_repo(
-        self,
-        repo: Repo,
-        commit: str,
-        gen_uuid: uuid_pkg.UUID,
-    ) -> str:
-        tmp_git_repo = self.get_tmp_repo(repo, gen_uuid)
-        tmp_git_repo.git.checkout(commit)
+    def checkout_firmware_sources(
+        self, repo: Repo, commit: str, destination: Path
+    ) -> None:
+        git_repo = self.get_repo(repo)
+        work_tree = destination.resolve()
+        with tempfile.TemporaryDirectory(dir=work_tree.parent) as git_dir:
+            shutil.copytree(git_repo.git_dir, git_dir, dirs_exist_ok=True)
+            Git(str(work_tree)).checkout(
+                commit,
+                force=True,
+                env={"GIT_DIR": git_dir, "GIT_WORK_TREE": str(work_tree)},
+            )
 
-        tmp_git_repo_path = tmp_git_repo.working_tree_dir
+        for path in work_tree.rglob("*"):
+            if path.is_symlink() and (
+                path.readlink().is_absolute()
+                or not path.resolve().is_relative_to(work_tree)
+            ):
+                name = path.relative_to(work_tree)
+                msg = f"Firmware symlink {name} points outside the source tree"
+                raise GitRepoError(msg, code=ErrorCode.GIT_REPO_FILE_NOT_FOUND)
+
         clean_files_with_pepeignore(
-            tmp_git_repo_path, f"{tmp_git_repo_path}/.pepeignore"
+            str(work_tree), str(work_tree / StaticRepoFileName.PEPEIGNORE)
         )
-
-        return tmp_git_repo_path
 
     def get_repo(self, repo: Repo) -> GitRepo:
         path = self.get_path_physic_repository(repo)
@@ -136,18 +148,8 @@ class GitRepoRepository:
         except GitRepoError:
             if self.local_only:
                 raise
-            self.clone(self._cloning_url(repo), path)
+            self.clone(self.get_cloning_url(repo), path)
             return self._open(path)
-
-    @staticmethod
-    def get_tmp_path(gen_uuid: uuid_pkg.UUID) -> str:
-        return f"tmp/{gen_uuid}"
-
-    def get_tmp_repo(self, repo: Repo, gen_uuid: uuid_pkg.UUID) -> GitRepo:
-        self.get_repo(repo)
-        tmp_path = self.get_tmp_path(gen_uuid)
-        shutil.copytree(self.get_path_physic_repository(repo), tmp_path)
-        return self._open(tmp_path)
 
     def get_front_commit(self, repo: Repo) -> str | None:
         git_repo = self.get_repo(repo)
@@ -510,30 +512,31 @@ class GitRepoRepository:
                 msg, code=ErrorCode.GIT_REPO_COMMIT_NOT_IN_BRANCH
             )
 
-    @staticmethod
-    def find_by_platform(
-        data: list[tuple[str, str]], platform: str
-    ) -> tuple[str, str] | None:
-        return next((item for item in data if item[0] == platform), None)
-
     def is_valid_firmware_platform(
         self,
         repo: Repo,
         unit: Unit,
-        firmware_platform: str,
+        firmware_platform: str | None,
         selected_commit_and_tag: tuple[str, str | None] | None = None,
     ):
         if not unit.is_compilable_unit:
             return
 
-        is_valid_object(repo.releases_data, NotFoundEntity.RELEASES)
-        releases = is_valid_json(
-            repo.releases_data,
-            JsonPayload.RELEASES_FOR_COMPILE_REPO_TITLE,
-        )
         _, selected_tag = (
             selected_commit_and_tag
             or self.get_selected_commit_and_tag(repo, unit)
+        )
+        self.get_firmware_asset(repo, selected_tag, firmware_platform)
+
+    def get_firmware_asset(
+        self,
+        repo: Repo,
+        selected_tag: str | None,
+        firmware_platform: str | None,
+    ) -> tuple[str, str]:
+        is_valid_object(repo.releases_data, NotFoundEntity.RELEASES)
+        releases = is_valid_json(
+            repo.releases_data, JsonPayload.RELEASES_FOR_COMPILE_REPO_TITLE
         )
         release_platforms = releases.get(selected_tag)
 
@@ -541,6 +544,16 @@ class GitRepoRepository:
             msg = "Release tag has no platforms"
             raise GitRepoError(msg, code=ErrorCode.GIT_REPO_TAG_NO_PLATFORMS)
 
-        if self.find_by_platform(release_platforms, firmware_platform) is None:
-            msg = f"Not find platform {firmware_platform}, available: {[item[0] for item in release_platforms]}"
+        asset = next(
+            (
+                (name, link)
+                for name, link in release_platforms
+                if name == firmware_platform
+            ),
+            None,
+        )
+        if asset is None:
+            available = [item[0] for item in release_platforms]
+            msg = f"Platform {firmware_platform} not found, available: {available}"
             raise GitRepoError(msg, code=ErrorCode.GIT_REPO_PLATFORM_NOT_FOUND)
+        return asset

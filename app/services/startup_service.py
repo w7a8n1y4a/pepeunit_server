@@ -10,16 +10,14 @@ from aiogram import Bot, Dispatcher
 from aiogram.types import WebhookInfo
 from clickhouse_migrations.clickhouse_cluster import ClickhouseCluster
 from fastapi import FastAPI
-from fastapi_mqtt import FastMQTT
 
 from app import runtime, settings
 from app.configs.emqx import ControlEmqx
-from app.configs.redis import get_redis_session
 from app.configs.utils import acquire_file_lock, wait_for_file_unlock
 from app.dto.agent.abc import AgentBackend
-from app.dto.enum import FileLock, GlobalPrefixTopic
+from app.dto.enum import FileLock
 from app.repositories.grafana_repository import GrafanaRepository
-from app.schemas.mqtt.manager import mqtt_manager
+from app.schemas.mqtt.manager import MqttManager
 from app.services.background import BackgroundService
 from app.services.notification_delivery import notification_delivery
 from app.services.peer_service import PeerService
@@ -32,7 +30,7 @@ class StartupService:
     def __init__(
         self,
         app: FastAPI,
-        mqtt: FastMQTT,
+        mqtt: MqttManager,
         bot: Bot | None = None,
         dp: Dispatcher | None = None,
     ) -> None:
@@ -41,14 +39,11 @@ class StartupService:
         self.bot = bot
         self.dp = dp
         self._init_lock = None
-        self._redis = None
         self._bot_tasks: list[asyncio.Task] = []
-        self._mqtt_task: asyncio.Task | None = None
         self._instance_tasks: list[asyncio.Task] = []
         self._singleton_tasks: list[asyncio.Task] = []
 
     async def start(self) -> None:
-        self._redis = await anext(get_redis_session())
         self._init_lock = acquire_file_lock(FileLock.INIT)
         if self._init_lock:
             await self._start_once()
@@ -60,22 +55,18 @@ class StartupService:
     async def stop(self) -> None:
         try:
             await self._cancel_tasks(self._bot_tasks, "Telegram bot")
-            if self._mqtt_task and not self._mqtt_task.done():
-                logging.info("Stopping MQTT task...")
-                self._mqtt_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await self._mqtt_task
             await self._cancel_tasks(self._instance_tasks, "instance")
             await self._cancel_tasks(self._singleton_tasks, "singleton")
-            await self.mqtt.mqtt_shutdown()
         finally:
-            self._release_locks()
+            try:
+                await asyncio.to_thread(self.mqtt.stop)
+            finally:
+                self._release_locks()
 
     def _release_locks(self) -> None:
         if self._init_lock is not None:
             self._init_lock.close()
             self._init_lock = None
-        mqtt_manager.release_subscription_lock()
 
     async def _start_once(self) -> None:
         mqtt_run_lock = acquire_file_lock(FileLock.MQTT_RUN)
@@ -86,7 +77,6 @@ class StartupService:
                 None,
                 GrafanaRepository.configure_admin_dashboard_permissions,
             )
-        await self._setup_backend_acl()
         self._start_telegram_bot()
         self._sync_local_repository()
         mqtt_run_lock.close()
@@ -94,9 +84,7 @@ class StartupService:
         logo_to_console()
 
     async def _start_every_worker(self) -> None:
-        self._mqtt_task = asyncio.create_task(
-            self._run_mqtt_client(), name="run_mqtt_client"
-        )
+        self.mqtt.start()
         with BackgroundService() as services:
             services.get_peer_service().refresh_cache()
         self._instance_tasks.append(
@@ -160,22 +148,6 @@ class StartupService:
             cluster_name=None,
             create_db_if_no_exists=True,
             multi_statement=True,
-        )
-
-    async def _setup_backend_acl(self) -> None:
-        backend_topics = (
-            f"{settings.pu_domain}/+/+/+{GlobalPrefixTopic.BACKEND_SUB_PREFIX.value}",
-            f"{settings.pu_domain}/+{GlobalPrefixTopic.BACKEND_SUB_PREFIX.value}",
-        )
-
-        async def hset_emqx_auth_keys(topic: str) -> None:
-            token = AgentBackend(
-                name=settings.pu_domain
-            ).generate_agent_token()
-            await self._redis.hset(f"mqtt_acl:{token}", topic, "all")
-
-        await asyncio.gather(
-            *[hset_emqx_auth_keys(topic) for topic in backend_topics]
         )
 
     def _sync_local_repository(self) -> None:
@@ -288,17 +260,6 @@ class StartupService:
         except asyncio.CancelledError:
             logging.info("Webhook bot task cancelled")
             raise
-
-    async def _run_mqtt_client(self) -> None:
-        logging.info(
-            f"Connect to mqtt server: {settings.pu_mqtt_host}:{settings.pu_mqtt_port}"
-        )
-        mqtt_manager.attach_loop(asyncio.get_running_loop())
-        await self.mqtt.mqtt_startup()
-        token = AgentBackend(name=settings.pu_domain).generate_agent_token()
-        access = await self._redis.hgetall(token)
-        for k, v in access.items():
-            logging.info(f"Redis set {k} access {v}")
 
     async def _run_instance_cache_loop(self) -> None:
         while True:

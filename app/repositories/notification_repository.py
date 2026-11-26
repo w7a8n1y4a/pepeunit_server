@@ -3,7 +3,7 @@ import uuid as uuid_pkg
 from datetime import datetime
 
 from fastapi import Depends
-from sqlalchemy import update
+from sqlalchemy import delete, literal, update
 from sqlalchemy.exc import DataError, IntegrityError
 from sqlmodel import Session, col, select
 
@@ -15,6 +15,7 @@ from app.dto.enum import NotificationType
 from app.repositories.base_repository import BaseRepository
 from app.repositories.utils import apply_enums, apply_offset_and_limit
 from app.schemas.pydantic.notification import NotificationFilter
+from app.utils.utils import naive_utc
 
 
 class NotificationRepository(BaseRepository[Notification]):
@@ -64,6 +65,30 @@ class NotificationRepository(BaseRepository[Notification]):
             Notification.create_datetime > since,
         )
         return self.db.exec(statement.limit(1)).first() is not None
+
+    def delete_older_than(
+        self, kind: NotificationType, before: datetime, limit: int
+    ) -> int:
+        cutoff = literal(naive_utc(before))
+        expired = (
+            select(Notification.uuid)
+            .where(
+                Notification.type == kind.value,
+                col(Notification.create_datetime) < cutoff,
+            )
+            .order_by(col(Notification.create_datetime))
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+            .cte()
+        )
+        statement = (
+            delete(Notification)
+            .where(col(Notification.uuid) == expired.c.uuid)
+            .execution_options(synchronize_session=False)
+        )
+        result = self.db.execute(statement)
+        self.db.commit()
+        return result.rowcount or 0
 
     def bulk_create(
         self, notifications: list[Notification]

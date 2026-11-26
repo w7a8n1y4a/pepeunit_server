@@ -52,6 +52,8 @@ from app.services.validators import is_valid_object
 
 class NotificationService:
     SCHEDULED_LOG_WINDOW = timedelta(days=1)
+    DATA_PIPE_ALERT_RETENTION = timedelta(days=90)
+    DATA_PIPE_ALERT_CLEANUP_BATCH_SIZE = 1000
     INSTANCE_ERROR_GROUPS = 3
     UNIT_SUMMARY_LIMIT = 10
     RESOURCE_LIMIT_PERCENT = 90
@@ -200,6 +202,18 @@ class NotificationService:
                 user_uuid=owner.uuid,
             )
         )
+
+    def delete_expired_data_pipe_alerts(self) -> int:
+        cutoff = datetime.now(UTC) - self.DATA_PIPE_ALERT_RETENTION
+        batch_size = self.DATA_PIPE_ALERT_CLEANUP_BATCH_SIZE
+        deleted = 0
+        while True:
+            count = self.notification_repository.delete_older_than(
+                NotificationType.DATA_PIPE_ALERT, cutoff, batch_size
+            )
+            deleted += count
+            if count < batch_size:
+                return deleted
 
     def generate_scheduled(self) -> list[Notification]:
         moment = datetime.now(UTC)

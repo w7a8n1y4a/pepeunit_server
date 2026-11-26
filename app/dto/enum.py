@@ -652,6 +652,7 @@ class FileLock(str, enum.Enum):
     INSTANCE_RESOURCES = "tmp/instance_resources.lock"
     NOTIFICATION_SCHEDULE = "tmp/notification_schedule.lock"
     NOTIFICATION_PROCESS = "tmp/notification_process.lock"
+    DATA_PIPE_ALERT_CLEANUP = "tmp/data_pipe_alert_cleanup.lock"
 
 
 class ErrorEntity(str, enum.Enum):

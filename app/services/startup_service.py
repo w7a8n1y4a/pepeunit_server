@@ -28,6 +28,7 @@ from app.utils.utils import logo_to_console
 
 class StartupService:
     NOTIFICATION_POLL_SECONDS = 5
+    DATA_PIPE_ALERT_CLEANUP_MINUTE = 15
 
     def __init__(
         self,
@@ -132,6 +133,16 @@ class StartupService:
         self._singleton_tasks.append(
             asyncio.create_task(
                 self.run_instance_resources(), name="instance_resources"
+            )
+        )
+        self._singleton_tasks.append(
+            asyncio.create_task(
+                self._run_locked_hourly(
+                    FileLock.DATA_PIPE_ALERT_CLEANUP,
+                    self.DATA_PIPE_ALERT_CLEANUP_MINUTE,
+                    self.cleanup_data_pipe_alerts,
+                ),
+                name="data_pipe_alert_cleanup",
             )
         )
         if runtime.get().pu_ff_notification_enable:
@@ -312,17 +323,15 @@ class StartupService:
             lock_fd = acquire_file_lock(lock)
             await asyncio.sleep(10)
             if lock_fd:
-                logging.info("Run update with lock")
+                logging.info("Run hourly job %s", lock)
                 try:
-                    # Git sync is synchronous and must not stall the
-                    # notification loop on this event loop
                     await asyncio.to_thread(work)
                 except Exception:
                     logging.exception("Hourly job %s failed", lock)
                 finally:
                     lock_fd.close()
             else:
-                logging.info("Skip update without lock")
+                logging.info("Skip hourly job %s without lock", lock)
 
     def _update_repositories(self) -> None:
         with BackgroundService() as services:
@@ -331,6 +340,13 @@ class StartupService:
     def _update_repo(self) -> None:
         with BackgroundService() as services:
             services.get_repo_service().sync_local_repository_storage(True)
+
+    def cleanup_data_pipe_alerts(self) -> None:
+        with BackgroundService() as services:
+            service = services.get_notification_service()
+            deleted = service.delete_expired_data_pipe_alerts()
+        if deleted:
+            logging.info("Deleted %s expired DataPipe alerts", deleted)
 
     async def _start_telegram_alert_queue(self) -> None:
         if (

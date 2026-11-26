@@ -2,7 +2,7 @@ import uuid as uuid_pkg
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Column, ForeignKey, String, Text
+from sqlalchemy import Column, ForeignKey, Index, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlmodel import Field, SQLModel
 
@@ -11,6 +11,11 @@ class Notification(SQLModel, table=True):
     """Notification of one user"""
 
     __tablename__ = "notifications"
+    __table_args__ = (
+        Index(
+            "ix_notifications_type_create_datetime", "type", "create_datetime"
+        ),
+    )
 
     uuid: uuid_pkg.UUID = Field(
         primary_key=True,

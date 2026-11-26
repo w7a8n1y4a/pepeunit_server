@@ -1,12 +1,12 @@
 import logging
 import os
 from datetime import UTC, datetime
-from unittest.mock import patch
 
 import pytest
 from sqlalchemy import func
 
 from app import runtime
+from app.configs.error_codes import ErrorCode
 from app.configs.errors import (
     GitRepoError,
     NoAccessError,
@@ -20,7 +20,6 @@ from app.dto.enum import (
     OperationTaskType,
     RepoStatus,
 )
-from app.repositories.git_platform_repository import GithubPlatformClient
 from app.schemas.pydantic.repo import (
     CommitFilter,
     Credentials,
@@ -333,12 +332,26 @@ def test_schedule_update_repo_without_credentials(
 
 
 def test_update_local_repository_sync_error(
-    github_public_repo,
+    public_repos,
     regular_user_token,
     database,
     extra_user,
     extra_user_token,
 ) -> None:
+    max_size_mib = 1
+    repo_uuid = next(
+        (
+            repo.uuid
+            for repo in public_repos
+            if (repo.local_repository_size or 0) > max_size_mib * 2**20
+        ),
+        None,
+    )
+    if repo_uuid is None:
+        pytest.skip(
+            "Configured public repositories fit within the minimum size limit"
+        )
+
     service = repo_service(database, regular_user_token)
     with (
         owner_setting(
@@ -346,25 +359,17 @@ def test_update_local_repository_sync_error(
             extra_user,
             extra_user_token,
             "pu_instance_repo_max_size",
-            1,
-        ),
-        patch.object(
-            GithubPlatformClient,
-            "get_repo_size",
-            return_value=2 * 2**20,
+            max_size_mib,
         ),
         pytest.raises(RepoError),
     ):
-        service.update_local_repository(github_public_repo.uuid)
+        service.update_local_repository(repo_uuid)
 
-    repo = service.get(github_public_repo.uuid)
+    repo = service.get(repo_uuid)
     assert repo.sync_status == RepoStatus.ERROR
     assert repo.sync_error
-
-    assert (
-        service.update_local_repository(github_public_repo.uuid)
-        == "Repo updated"
-    )
+    assert f": {ErrorCode.GIT_REPO_TOO_LARGE.value}: " in repo.sync_error
+    assert service.update_local_repository(repo_uuid) == "Repo updated"
 
 
 def test_sync_local_repository_storage(

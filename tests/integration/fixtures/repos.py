@@ -1,29 +1,26 @@
 import json
 import logging
 import os
-import uuid as uuid_pkg
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from pathlib import Path
-from shutil import rmtree
 
 import pytest
-from git import Actor
-from git import Repo as GitRepo
+from sqlmodel import Session
 
 from app import settings
+from app.configs.errors import GitRepoError
 from app.domain.repo_model import Repo
-from app.dto.enum import GitPlatform, RepoStatus, StaticRepoFileName
+from app.dto.enum import FieldKey, GitPlatform, RepoStatus
 from app.repositories.git_repo_repository import GitRepoRepository
-from app.repositories.icon_repository import IconRepository
 from app.schemas.pydantic.repo import (
+    CommitRead,
     Credentials,
     RepoCreate,
 )
-from app.services.icon_image import IconImage
+from app.services.repo_service import RepoService
 from app.utils.utils import ensure_timezone_aware
 from tests.integration.helpers.http import patch_update_local_repository
-from tests.integration.helpers.services import repo_service
+from tests.integration.helpers.private_repos import load_private_repo_specs
+from tests.integration.helpers.services import all_branch_commits, repo_service
 from tests.integration.helpers.wait import wait_until
 
 
@@ -223,52 +220,109 @@ def private_repo(private_repos):
 @dataclass(frozen=True)
 class CompiledRepo:
     repo: Repo
+    branch: str
     tagged_commit: str
     untagged_commit: str
     tag: str
     asset_url: str
 
 
-@pytest.fixture
-def compiled_repo(tmp_path, regular_user, database) -> CompiledRepo:
-    manifest = Path("tests/data/unit_manifest/unit.yml")
-    origin = GitRepo.init(tmp_path / "origin", initial_branch="main")
-    manifest_name = StaticRepoFileName.UNIT_MANIFEST.value
-    (Path(origin.working_tree_dir) / manifest_name).write_bytes(
-        manifest.read_bytes()
-    )
-    author = Actor("Integration tests", "integration@example.test")
-    origin.index.add([manifest_name])
-    tagged = origin.index.commit(
-        "Compiled manifest", author=author, committer=author
-    )
-    tag = origin.create_tag("fixture-release").name
-    untagged = origin.index.commit(
-        "Untagged version", author=author, committer=author
-    )
+def _compiled_branch(
+    service: RepoService,
+    repo: Repo,
+    branch: str,
+    commits: list[CommitRead],
+    assets: dict[str, str],
+) -> CompiledRepo | None:
+    tagged = untagged = None
+    for commit in commits:
+        if commit.tag:
+            if tagged is not None or commit.tag not in assets:
+                continue
+        elif untagged is not None:
+            continue
 
-    url = f"https://repo.pepeunit.test/{uuid_pkg.uuid4()}.git"
-    asset = "https://repo.pepeunit.test/releases/esp32.bin"
-    icon = IconRepository(database).stage(IconImage.generate(url))
-    now = datetime.now(UTC)
-    repo = Repo(
-        creator_uuid=regular_user.uuid,
-        icon_uuid=icon.uuid,
-        platform=GitPlatform.GITLAB,
-        repository_url=url,
-        sync_status=RepoStatus.UPDATED,
-        create_datetime=now,
-        last_update_datetime=now,
-        releases_data=json.dumps({tag: [["esp32", asset]]}),
-    )
-    path = Path(GitRepoRepository.get_path_physic_repository(repo))
-    GitRepo.clone_from(origin.working_tree_dir, path)
-    database.add(repo)
-    database.commit()
+        try:
+            manifest, _ = service.unit_manifest_service.read_from_commit(
+                repo, commit.commit
+            )
+        except GitRepoError:
+            continue
+        probe_pin = manifest.env.get("PROBE_PIN")
+        if (
+            not manifest.is_compilable
+            or probe_pin is None
+            or probe_pin.get(FieldKey.OPTIONAL)
+            or FieldKey.DEFAULT in probe_pin
+        ):
+            continue
+        if commit.tag:
+            tagged = commit
+        else:
+            untagged = commit
+        if tagged and tagged.tag and untagged:
+            return CompiledRepo(
+                repo,
+                branch,
+                tagged.commit,
+                untagged.commit,
+                tagged.tag,
+                assets[tagged.tag],
+            )
+    return None
 
-    try:
-        yield CompiledRepo(repo, tagged.hexsha, untagged.hexsha, tag, asset)
-    finally:
-        database.delete(repo)
-        database.commit()
-        rmtree(path, ignore_errors=True)
+
+def _find_compiled_repo(
+    repos: list[Repo], token: str, database: Session
+) -> CompiledRepo | None:
+    service = repo_service(database, token)
+    for repo in repos:
+        releases = json.loads(repo.releases_data or "{}")
+        assets = {
+            tag: url
+            for tag, release_assets in releases.items()
+            for platform, url in release_assets
+            if platform == "esp32" and url
+        }
+        if not assets:
+            continue
+        for branch in service.git_repo_repository.get_branches(repo):
+            candidate = _compiled_branch(
+                service,
+                repo,
+                branch,
+                all_branch_commits(database, token, repo.uuid, branch),
+                assets,
+            )
+            if candidate is not None:
+                return candidate
+    return None
+
+
+@pytest.fixture(scope="session")
+def compiled_repo(
+    request: pytest.FixtureRequest,
+    public_repos: list[Repo],
+    regular_user_token: str,
+    database: Session,
+) -> CompiledRepo:
+    candidate = _find_compiled_repo(public_repos, regular_user_token, database)
+    if candidate is not None:
+        return candidate
+
+    if (
+        settings.pu_test_integration_private_repo_enable
+        and load_private_repo_specs()
+    ):
+        candidate = _find_compiled_repo(
+            request.getfixturevalue("private_repos"),
+            regular_user_token,
+            database,
+        )
+        if candidate is not None:
+            return candidate
+
+    pytest.skip(
+        "Configured test repositories have no branch with an esp32 release asset "
+        "and an untagged compiled commit that both require PROBE_PIN"
+    )

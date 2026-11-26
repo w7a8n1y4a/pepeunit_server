@@ -392,7 +392,7 @@ def compiled_unit(compiled_repo, regular_user_token, database, cc) -> Unit:
             repo_uuid=compiled_repo.repo.uuid,
             name=unique_name("cfw"),
             visibility_level=VisibilityLevel.PRIVATE,
-            target_branch="main",
+            target_branch=compiled_repo.branch,
             target_commit=compiled_repo.tagged_commit,
             target_firmware_platform="esp32",
             is_auto_update_unit=False,

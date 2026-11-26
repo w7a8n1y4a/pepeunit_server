@@ -406,7 +406,7 @@ def test_compiled_unit_requires_tag_and_platform(
     )
     data = UnitCreate(
         repo_uuid=compiled_repo.repo.uuid,
-        target_branch="main",
+        target_branch=compiled_repo.branch,
         visibility_level=VisibilityLevel.PRIVATE,
         is_auto_update_unit=False,
         is_only_tag_update=False,

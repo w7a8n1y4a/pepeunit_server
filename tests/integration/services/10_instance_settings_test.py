@@ -6,6 +6,7 @@ from app.dto.enum import OperationTaskStatus, OperationTaskType
 from app.repositories.operation_task_repository import OperationTaskRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.pydantic.instance_settings import InstanceSettingsUpdate
+from app.schemas.pydantic.operation_task import OperationTaskCreate
 from app.schemas.pydantic.user import UserCreate
 from app.services.instance_settings_service import InstanceSettingsService
 from tests.integration.helpers.instance_settings import wait_runtime
@@ -13,6 +14,7 @@ from tests.integration.helpers.keys import fresh_key
 from tests.integration.helpers.owner import as_owner
 from tests.integration.helpers.services import (
     instance_settings_service,
+    operation_task_service,
     user_service,
 )
 
@@ -87,13 +89,12 @@ def test_group_limit_range(database, extra_user, extra_user_token) -> None:
 
 
 def test_reboot_is_marked_on_start(
-    database, extra_user, extra_user_token, monkeypatch
+    database, extra_user, extra_user_token
 ) -> None:
-    monkeypatch.setattr(
-        InstanceSettingsService, "_restart_after_response", lambda: None
-    )
     with as_owner(database, extra_user):
-        task = instance_settings_service(database, extra_user_token).reboot()
+        task = operation_task_service(database, extra_user_token).create(
+            OperationTaskCreate(task_type=OperationTaskType.REBOOT_INSTANCE)
+        )
         assert task.task_type == OperationTaskType.REBOOT_INSTANCE.value
         assert task.status == OperationTaskStatus.RUNNING.value
 

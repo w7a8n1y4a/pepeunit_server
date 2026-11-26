@@ -173,7 +173,7 @@ def _read_instance_log_settings() -> tuple[str, str] | None:
             cursor.execute(
                 "SELECT pu_instance_log_min_level, pu_instance_log_format "
                 "FROM instance_settings WHERE uuid = %s",
-                (InstanceSettings.ROW_UUID,),
+                (str(InstanceSettings.ROW_UUID),),
             )
             row = cursor.fetchone()
     except psycopg2.Error:

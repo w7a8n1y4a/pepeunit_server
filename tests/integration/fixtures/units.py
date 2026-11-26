@@ -6,14 +6,21 @@ import zlib
 from dataclasses import dataclass, fields
 
 import pytest
+from pepeunit_client.file_manager import FileManager
 
 from app import runtime
+from app.domain.unit_model import Unit
 from app.dto.enum import StaticRepoFileName, VisibilityLevel
 from app.schemas.pydantic.unit import UnitCreate
+from app.schemas.pydantic.unit_io import UnitIOTopicRead
+from tests.client.mqtt import COUNTER_INPUT, COUNTER_OUTPUT, UNIT_ROOT
+from tests.integration.helpers.mqtt import MQTTProbe, link_between
 from tests.integration.helpers.names import entity_name, unique_name
 from tests.integration.helpers.services import (
     branch_commits,
+    find_unit_io,
     repo_read,
+    unit_io_service,
     unit_service,
 )
 from tests.integration.helpers.wait import wait_until
@@ -27,8 +34,7 @@ def _create_manual_unit(
     name: str,
     visibility_level: VisibilityLevel,
     *,
-    compile_unit: bool = False,
-    is_only_tag_update: bool = True,
+    is_only_tag_update: bool = False,
 ):
     service = unit_service(database, cc, token)
     read, commits = branch_commits(database, token, repo.uuid)
@@ -39,10 +45,8 @@ def _create_manual_unit(
             name=name,
             target_branch=read.branches[0],
             is_auto_update_unit=False,
-            is_compilable_unit=compile_unit,
             is_only_tag_update=is_only_tag_update,
             target_commit=commits[0].commit,
-            target_firmware_platform="Universal" if compile_unit else None,
         )
     )
 
@@ -55,7 +59,7 @@ def _create_auto_unit(
     name: str,
     visibility_level: VisibilityLevel,
     *,
-    is_only_tag_update: bool = True,
+    is_only_tag_update: bool = False,
 ):
     read = repo_read(database, token, repo)
     return unit_service(database, cc, token).create(
@@ -81,16 +85,22 @@ class LiveUnits:
     chain_source_unit: object
     chain_middle_unit: object
     chain_sink_unit: object
-    compile_unit: object
+    auxiliary_unit: object
 
     def all(self) -> list:
         return [getattr(self, item.name) for item in fields(self)]
 
     def firmware_manual(self) -> list:
-        return [unit for unit in self.all() if unit is not self.universal_auto_unit]
+        return [
+            unit for unit in self.all() if unit is not self.universal_auto_unit
+        ]
 
     def chain(self) -> list:
-        return [self.chain_source_unit, self.chain_middle_unit, self.chain_sink_unit]
+        return [
+            self.chain_source_unit,
+            self.chain_middle_unit,
+            self.chain_sink_unit,
+        ]
 
     def piped(self) -> list:
         return [
@@ -174,14 +184,13 @@ def live_units(universal_repo, regular_user_token, database, cc) -> LiveUnits:
             entity_name("u_csnk"),
             VisibilityLevel.PRIVATE,
         ),
-        compile_unit=_create_manual_unit(
+        auxiliary_unit=_create_manual_unit(
             database,
             cc,
             token,
             repo,
-            entity_name("u_cmp"),
+            entity_name("u_aux"),
             VisibilityLevel.PUBLIC,
-            compile_unit=True,
         ),
     )
 
@@ -233,16 +242,15 @@ def chain_sink_unit(live_units):
 
 
 @pytest.fixture(scope="session")
-def compile_unit(live_units):
-    return live_units.compile_unit
+def auxiliary_unit(live_units):
+    return live_units.auxiliary_unit
 
 
 @pytest.fixture(scope="session")
-def unpacked_firmwares(live_units, regular_user_token, database, cc) -> LiveUnits:
+def unpacked_firmwares(
+    live_units, regular_user_token, database, cc
+) -> LiveUnits:
     service = unit_service(database, cc, regular_user_token)
-    test_unit_path = "tmp/test_units"
-    os.makedirs(test_unit_path, exist_ok=True)
-
     methods = [
         service.get_unit_firmware_zip,
         service.get_unit_firmware_tar,
@@ -258,7 +266,9 @@ def unpacked_firmwares(live_units, regular_user_token, database, cc) -> LiveUnit
             leftovers.append(tgz_path)
             with open(tgz_path, "rb") as handle:
                 producer = zlib.decompressobj(wbits=9)
-                tar_data = producer.decompress(handle.read()) + producer.flush()
+                tar_data = (
+                    producer.decompress(handle.read()) + producer.flush()
+                )
             archive_path = f"tmp/{unit.uuid}.tar"
             with open(archive_path, "wb") as tar_file:
                 tar_file.write(tar_data)
@@ -266,12 +276,13 @@ def unpacked_firmwares(live_units, regular_user_token, database, cc) -> LiveUnit
             archive_path = methods[method_idx](unit.uuid)
 
         leftovers.append(archive_path)
-        unpack_path = f"{test_unit_path}/{unit.uuid}"
-        shutil.unpack_archive(archive_path, unpack_path, "zip" if method_idx == 0 else "tar")
+        unpack_path = UNIT_ROOT / str(unit.uuid)
+        shutil.unpack_archive(
+            archive_path, unpack_path, "zip" if method_idx == 0 else "tar"
+        )
 
-        with open(f"{unpack_path}/{StaticRepoFileName.ENV.value}") as handle:
-            env_dict = json.loads(handle.read())
-            assert len(env_dict["PU_AUTH_TOKEN"]) > 100
+        env = FileManager.read_env(str(unpack_path / StaticRepoFileName.ENV))
+        assert len(env["PU_AUTH_TOKEN"]) > 100
 
     for path in leftovers:
         os.remove(path)
@@ -280,13 +291,21 @@ def unpacked_firmwares(live_units, regular_user_token, database, cc) -> LiveUnit
 
 
 @pytest.fixture(scope="session")
-def running_units(unpacked_firmwares, client_emulator, regular_user_token, database, cc) -> LiveUnits:
-    client_emulator.task_queue.put(unpacked_firmwares.all())
+def running_units(
+    unpacked_firmwares, client_emulator, regular_user_token, database, cc
+) -> LiveUnits:
+    client_emulator.start_units(unpacked_firmwares.all())
     service = unit_service(database, cc, regular_user_token)
+
+    def all_reported() -> bool:
+        client_emulator.require_running()
+        return all(
+            service.get(unit.uuid).current_commit_version
+            for unit in unpacked_firmwares.all()
+        )
+
     wait_until(
-        lambda: all(
-            service.get(unit.uuid).current_commit_version for unit in unpacked_firmwares.all()
-        ),
+        all_reported,
         timeout=runtime.get().pu_instance_unit_state_send_interval * 2 + 10,
         message="emulators did not report current_commit_version",
         session=database,
@@ -296,17 +315,17 @@ def running_units(unpacked_firmwares, client_emulator, regular_user_token, datab
 
 @pytest.fixture(scope="session")
 def chain_links(running_units, regular_user_token, database, cc):
-    from app.dto.enum import UnitIOTypeEnum
-    from app.schemas.pydantic.unit_io import LinkCreate, UnitIOFilter
+    from app.schemas.pydantic.unit_io import LinkCreate
     from tests.integration.helpers.services import unit_io_service
 
     service = unit_io_service(database, cc, regular_user_token)
-    io_units_list = []
-    for unit in running_units.chain():
-        _, unit_ios = service.list(UnitIOFilter.unlimited(unit_uuid=unit.uuid))
-        if unit_ios[0].type == UnitIOTypeEnum.OUTPUT:
-            unit_ios = unit_ios[::-1]
-        io_units_list.append(unit_ios)
+    io_units_list = [
+        [
+            find_unit_io(service, unit.uuid, COUNTER_INPUT),
+            find_unit_io(service, unit.uuid, COUNTER_OUTPUT),
+        ]
+        for unit in running_units.chain()
+    ]
 
     service.create_link(
         LinkCreate(
@@ -363,3 +382,59 @@ def private_crud_unit(universal_repo, regular_user_token, database, cc):
         unit_service(database, cc, token).delete(unit.uuid)
     except Exception:
         pass
+
+
+@pytest.fixture
+def compiled_unit(compiled_repo, regular_user_token, database, cc) -> Unit:
+    service = unit_service(database, cc, regular_user_token)
+    unit = service.create(
+        UnitCreate(
+            repo_uuid=compiled_repo.repo.uuid,
+            name=unique_name("cfw"),
+            visibility_level=VisibilityLevel.PRIVATE,
+            target_branch="main",
+            target_commit=compiled_repo.tagged_commit,
+            target_firmware_platform="esp32",
+            is_auto_update_unit=False,
+            is_only_tag_update=False,
+        )
+    )
+    try:
+        yield unit
+    finally:
+        service.delete(unit.uuid)
+
+
+@pytest.fixture
+def mqtt_unit(crud_unit, regular_user_token, database, cc) -> MQTTProbe:
+    service = unit_service(database, cc, regular_user_token)
+    return MQTTProbe.from_unit(service, crud_unit.uuid)
+
+
+@pytest.fixture
+def private_mqtt_unit(
+    private_crud_unit, regular_user_token, database, cc
+) -> MQTTProbe:
+    service = unit_service(database, cc, regular_user_token)
+    return MQTTProbe.from_unit(service, private_crud_unit.uuid)
+
+
+@pytest.fixture
+def auxiliary_unit_token(
+    auxiliary_unit, regular_user_token, database, cc
+) -> str:
+    service = unit_service(database, cc, regular_user_token)
+    return service.generate_token(auxiliary_unit.uuid)
+
+
+@pytest.fixture
+def selected_link_route(
+    mqtt_unit, private_mqtt_unit, regular_user_token, database, cc
+) -> tuple[UnitIOTopicRead, UnitIOTopicRead, UnitIOTopicRead]:
+    service = unit_io_service(database, cc, regular_user_token)
+    output = mqtt_unit.topics.output["selected_counter"]
+    local_input = mqtt_unit.topics.input["bounded_counter"]
+    remote_input = private_mqtt_unit.topics.input["bounded_counter"]
+    service.create_link(link_between(output, local_input))
+    service.create_link(link_between(output, remote_input))
+    return output, local_input, remote_input

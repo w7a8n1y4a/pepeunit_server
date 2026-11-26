@@ -14,13 +14,13 @@ from app.configs.errors import (
 )
 from app.domain.repo_model import Repo
 from app.domain.unit_model import Unit
-from app.repositories.git_platform_repository import GithubPlatformClient
 from app.dto.enum import (
     CredentialStatus,
     OperationTaskStatus,
     OperationTaskType,
     RepoStatus,
 )
+from app.repositories.git_platform_repository import GithubPlatformClient
 from app.schemas.pydantic.repo import (
     CommitFilter,
     Credentials,
@@ -39,9 +39,7 @@ from tests.integration.helpers.services import (
 from tests.integration.helpers.wait import wait_task_finish
 
 
-def test_create_repo(
-    public_repos, regular_user_token, database
-) -> None:
+def test_create_repo(public_repos, regular_user_token, database) -> None:
     service = repo_service(database, regular_user_token)
     for repo in public_repos:
         logging.info(repo.repository_url)
@@ -87,9 +85,7 @@ def test_get_commits_repository(
 ) -> None:
     service = repo_service(database, regular_user_token)
     logging.info(universal_repo.uuid)
-    target_branch = service.git_repo_repository.get_branches(
-        universal_repo
-    )[0]
+    target_branch = service.git_repo_repository.get_branches(universal_repo)[0]
 
     branch_commits = all_branch_commits(
         database, regular_user_token, universal_repo.uuid, target_branch
@@ -101,9 +97,7 @@ def test_get_commits_bad_branch(
     universal_repo, regular_user_token, database
 ) -> None:
     service = repo_service(database, regular_user_token)
-    target_branch = service.git_repo_repository.get_branches(
-        universal_repo
-    )[0]
+    target_branch = service.git_repo_repository.get_branches(universal_repo)[0]
 
     with pytest.raises(GitRepoError):
         service.get_branch_commits(
@@ -238,7 +232,9 @@ def test_child_unit_count(
 
     universal_count = expected(universal_repo)
     assert universal_count >= len(live_units.all())
-    assert service.read(universal_repo.uuid).child_unit_count == universal_count
+    assert (
+        service.read(universal_repo.uuid).child_unit_count == universal_count
+    )
 
     _count, repos = service.list(RepoFilter(uuids=[universal_repo.uuid]))
     _repo, child_unit_count = repos[0]
@@ -254,23 +250,17 @@ def test_update_local_repository(
     github_public_repo, regular_user_token, database
 ) -> None:
     service = repo_service(database, regular_user_token)
-    service.git_repo_repository.delete_repo(
-        Repo(uuid=github_public_repo.uuid)
-    )
+    service.git_repo_repository.delete_repo(Repo(uuid=github_public_repo.uuid))
     service.update_local_repository(github_public_repo.uuid)
     repo_api = service.get(github_public_repo.uuid)
-    assert (
-        repo_api.sync_status == RepoStatus.UPDATED
-    )
+    assert repo_api.sync_status == RepoStatus.UPDATED
 
 
 def test_get_commits_only_tag(
     universal_repo, regular_user_token, database
 ) -> None:
     service = repo_service(database, regular_user_token)
-    target_branch = service.git_repo_repository.get_branches(
-        universal_repo
-    )[0]
+    target_branch = service.git_repo_repository.get_branches(universal_repo)[0]
     commits = service.get_branch_commits(
         universal_repo.uuid,
         CommitFilter(repo_branch=target_branch, only_tag=True),
@@ -329,8 +319,7 @@ def test_schedule_update_repo(
     assert finished.status == OperationTaskStatus.SUCCESS.value
     assert finished.result == "Repo updated"
     assert (
-        service.get(github_public_repo.uuid).sync_status
-        == RepoStatus.UPDATED
+        service.get(github_public_repo.uuid).sync_status == RepoStatus.UPDATED
     )
 
 
@@ -386,9 +375,7 @@ def test_sync_local_repository_storage(
 
     logging.info(summary)
     assert summary.startswith("Synced ")
-    assert f"of {len(service.repo_repository.get_all())}" in (
-        summary
-    )
+    assert f"of {len(service.repo_repository.get_all())}" in (summary)
 
 
 def test_schedule_update_all_without_admin(
@@ -399,9 +386,7 @@ def test_schedule_update_all_without_admin(
         service.schedule_update_all()
 
 
-def test_schedule_update_all(
-    public_repos, admin_user_token, database
-) -> None:
+def test_schedule_update_all(public_repos, admin_user_token, database) -> None:
     service = repo_service(database, admin_user_token)
     task = service.schedule_update_all()
 
@@ -433,20 +418,20 @@ def test_get_available_platforms(
     )
     assert len(platforms) == 0
 
-    commits = service.git_repo_repository.get_branch_commits_with_tag(
-        universal_repo, branch
+    commits = all_branch_commits(
+        database, regular_user_token, universal_repo.uuid, branch
     )
     platforms = service.get_available_platforms(
         universal_repo.uuid,
-        target_commit=commits[-1]["commit"],
+        target_commit=commits[-1].commit,
         branch=branch,
     )
-    assert len(platforms) == 0
+    assert platforms == []
 
-    tags = service.git_repo_repository.get_tags_from_all_commits(commits)
+    tagged = next(commit for commit in commits if commit.tag is not None)
     platforms = service.get_available_platforms(
         universal_repo.uuid,
-        target_commit=tags[0]["commit"],
+        target_commit=tagged.commit,
         branch=branch,
     )
-    assert len(platforms) > 0
+    assert platforms

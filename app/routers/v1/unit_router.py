@@ -1,18 +1,16 @@
-import logging
 import os
 import uuid as uuid_pkg
-from typing import Literal
 
 import yaml
 from fastapi import APIRouter, Depends, status
 from starlette.background import BackgroundTask
 from starlette.responses import FileResponse, PlainTextResponse, Response
 
-from app.configs.db import get_hand_session
-from app.configs.rest import get_unit_service
+from app.configs.rest import get_mqtt_auth_service, get_unit_service
 from app.dto.enum import (
     AgentType,
     BackendTopicCommand,
+    MqttAction,
     StaticRepoFileName,
 )
 from app.schemas.pydantic.shared import MqttRead
@@ -32,6 +30,7 @@ from app.schemas.pydantic.unit import (
     UnitUpdate,
     UnitUpdatePreviewRead,
 )
+from app.services.mqtt_auth_service import MqttAuthService
 from app.services.unit_env_serializer import UnitEnvSerializer
 from app.services.unit_service import UnitService
 
@@ -167,19 +166,14 @@ def get_state_storage(
 
 @router.post("/auth", response_model=MqttRead, status_code=status.HTTP_200_OK)
 def get_mqtt_auth(
-    data: UnitMqttTokenAuth, action: Literal["publish", "subscribe"]
+    data: UnitMqttTokenAuth,
+    action: MqttAction,
+    mqtt_auth_service: MqttAuthService = Depends(get_mqtt_auth_service),
 ) -> MqttRead:
-    with get_hand_session() as db:
-        try:
-            unit_service = get_unit_service(db, None, data.token)
-            unit_service.get_mqtt_auth(
-                data.topic, is_subscribe=action == "subscribe"
-            )
-        except Exception as e:
-            logging.info(repr(e))
-            return MqttRead(result="deny")
-
-    return MqttRead(result="allow")
+    allowed = mqtt_auth_service.authorize(
+        data.token, data.topic, is_subscribe=action == MqttAction.SUBSCRIBE
+    )
+    return MqttRead(result="allow" if allowed else "deny")
 
 
 @router.post(

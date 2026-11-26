@@ -1,25 +1,91 @@
 import asyncio
+import logging
 import time
 import uuid
+from dataclasses import dataclass
+from multiprocessing.managers import AcquirerProxy, BarrierProxy, ValueProxy
+from threading import BrokenBarrierError
 
 from paho.mqtt import client as mqtt_client
 
+from app.dto.enum import TypeInputValue
 from app.utils.utils import generate_random_string
 from tests.load.src.dto.config import LoadTestConfig
 
 MQTT_TIMEOUT = 10
-OUTPUT_TOPIC = "output/pepeunit"
+
+
+@dataclass(frozen=True)
+class MQTTLoadStartup:
+    connection_interval: float
+    next_connection: ValueProxy
+    lock: AcquirerProxy
+    barrier: BarrierProxy
+    deadline: float
+
+    async def wait_for_connection(self) -> None:
+        if not self.connection_interval:
+            return
+        while True:
+            with self.lock:
+                now = time.monotonic()
+                delay = self.next_connection.get() - now
+                if delay <= 0:
+                    self.next_connection.set(now + self.connection_interval)
+                    return
+            await asyncio.sleep(delay)
+
+    async def wait_for_publish(self) -> None:
+        try:
+            await asyncio.to_thread(
+                self.barrier.wait, max(0, self.deadline - time.monotonic())
+            )
+        except BrokenBarrierError as exc:
+            msg = "MQTT load workers did not connect all units in time"
+            raise TimeoutError(msg) from exc
 
 
 class MQTTLoadTest:
+    CONNECT_ATTEMPTS = 3
     start_time: float
 
-    def __init__(self, config: LoadTestConfig, units):
+    def __init__(self, config: LoadTestConfig, units: list[dict]):
         self.config = config
         self.units = units
-        self.clients = []
+        self.clients: list[mqtt_client.Client] = []
 
-    async def connect_mqtt(self, token, broker, port):
+    async def connect_unit(
+        self, unit: dict, startup: MQTTLoadStartup | None = None
+    ) -> mqtt_client.Client:
+        env = unit["env"]
+        target = f"{env['PU_MQTT_HOST']}:{env['PU_MQTT_PORT']}"
+        attempt = 1
+        while True:
+            if startup is not None:
+                await startup.wait_for_connection()
+            try:
+                return await self.connect_mqtt(unit)
+            except OSError as exc:
+                detail = str(exc) or f"no CONNACK within {MQTT_TIMEOUT}s"
+                if attempt == self.CONNECT_ATTEMPTS:
+                    msg = (
+                        f"MQTT connection to {target} failed for unit "
+                        f"{unit['uuid']} after {attempt} attempts: {detail}"
+                    )
+                    raise RuntimeError(msg) from exc
+                logging.warning(
+                    "MQTT connection to %s failed for unit %s (attempt %s/%s): %s",
+                    target,
+                    unit["uuid"],
+                    attempt,
+                    self.CONNECT_ATTEMPTS,
+                    detail,
+                )
+                await asyncio.sleep(1)
+                attempt += 1
+
+    async def connect_mqtt(self, unit: dict) -> mqtt_client.Client:
+        env = unit["env"]
         loop = asyncio.get_running_loop()
         connected = loop.create_future()
         client = mqtt_client.Client(
@@ -27,54 +93,77 @@ class MQTTLoadTest:
             client_id=str(uuid.uuid4()),
             reconnect_on_failure=False,
         )
-        self.clients.append(client)
 
-        def finish_connect(reason_code):
+        def finish_connect(
+            reason_code: mqtt_client.ReasonCode, disconnected: bool = False
+        ) -> None:
             if connected.done():
                 return
-            if reason_code.is_failure:
+            if disconnected:
                 connected.set_exception(
-                    RuntimeError(f"MQTT connection rejected: {reason_code}")
+                    ConnectionError(
+                        f"Disconnected before CONNACK: {reason_code}"
+                    )
                 )
             else:
-                connected.set_result(None)
+                connected.set_result(reason_code)
 
-        def on_connect(client, userdata, flags, reason_code, properties):
+        def on_connect(_client, _userdata, _flags, reason_code, _properties):
             loop.call_soon_threadsafe(finish_connect, reason_code)
 
-        client.username_pw_set(token, "")
+        def on_disconnect(
+            _client, _userdata, _flags, reason_code, _properties
+        ):
+            loop.call_soon_threadsafe(finish_connect, reason_code, True)
+
+        client.username_pw_set(env["PU_AUTH_TOKEN"], "")
         client.on_connect = on_connect
-        client.connect_async(broker, int(port))
-        client.loop_start()
-        await asyncio.wait_for(connected, timeout=MQTT_TIMEOUT)
+        client.on_disconnect = on_disconnect
+        try:
+            status = await asyncio.to_thread(
+                client.connect, env["PU_MQTT_HOST"], int(env["PU_MQTT_PORT"])
+            )
+            if status != mqtt_client.MQTT_ERR_SUCCESS:
+                raise ConnectionError(mqtt_client.error_string(status))
+            client.loop_start()
+            reason = await asyncio.wait_for(connected, timeout=MQTT_TIMEOUT)
+            if reason.is_failure:
+                msg = f"MQTT connection rejected for unit {unit['uuid']}: {reason}"
+                raise RuntimeError(msg)
+        except BaseException:
+            client.disconnect()
+            client.loop_stop()
+            raise
+        self.clients.append(client)
         return client
 
-    async def publish(self, client, unit):
-        topic_dict = self.get_dict_by_topic(unit, OUTPUT_TOPIC)
-        topic = f"{unit['env']['PU_DOMAIN']}/{topic_dict['uuid']}/pepeunit"
+    async def publish(self, client: mqtt_client.Client, unit: dict) -> int:
+        topic = unit["output"]["topic"]
+        qos = unit["output"].get("qos", 0)
         message = generate_random_string(self.config.message_size)
         count = 0
         last_message = None
 
         while time.monotonic() - self.start_time < self.config.duration:
             if not client.is_connected():
-                raise RuntimeError(
-                    f"MQTT disconnected for unit {unit['uuid']}"
-                )
-            if self.config.value_type == "Text":
+                msg = f"MQTT disconnected for unit {unit['uuid']}"
+                raise RuntimeError(msg)
+            if self.config.value_type == TypeInputValue.TEXT:
                 if count % self.config.duplicate_count == 0:
                     message = generate_random_string(self.config.message_size)
             else:
                 message = count // self.config.duplicate_count
 
-            last_message = client.publish(topic, message)
+            last_message = client.publish(topic, message, qos=qos)
             if last_message.rc != mqtt_client.MQTT_ERR_SUCCESS:
-                raise RuntimeError(
+                msg = (
                     f"MQTT publish failed for unit {unit['uuid']}: "
                     f"{mqtt_client.error_string(last_message.rc)}"
                 )
+                raise RuntimeError(msg)
             count += 1
-            await asyncio.sleep(1 / self.config.rps)
+            next_send = self.start_time + count / self.config.rps
+            await asyncio.sleep(max(0, next_send - time.monotonic()))
 
         # QoS 0 success means queued. Flush the final packet before disconnecting.
         if last_message is not None:
@@ -83,69 +172,29 @@ class MQTTLoadTest:
                     while not last_message.is_published():
                         await asyncio.sleep(0.01)
             except TimeoutError as exc:
-                raise RuntimeError(
-                    f"MQTT publish timed out for unit {unit['uuid']}"
-                ) from exc
+                msg = f"MQTT publish timed out for unit {unit['uuid']}"
+                raise RuntimeError(msg) from exc
         return count
 
-    async def start_test(self):
-        for unit in self.units:
-            self.validate_unit(unit)
+    async def start_test(self, startup: MQTTLoadStartup) -> int:
         try:
-            async with asyncio.TaskGroup() as group:
-                connections = [
-                    group.create_task(
-                        self.connect_mqtt(
-                            unit["env"]["PU_AUTH_TOKEN"],
-                            unit["env"]["PU_MQTT_HOST"],
-                            unit["env"]["PU_MQTT_PORT"],
-                        )
-                    )
-                    for unit in self.units
-                ]
-
+            for unit in self.units:
+                await self.connect_unit(unit, startup)
+            await startup.wait_for_publish()
             self.start_time = time.monotonic()
             async with asyncio.TaskGroup() as group:
                 tasks = [
-                    group.create_task(self.publish(connection.result(), unit))
-                    for connection, unit in zip(connections, self.units)
+                    group.create_task(self.publish(connection, unit))
+                    for connection, unit in zip(
+                        self.clients, self.units, strict=True
+                    )
                 ]
             return sum(task.result() for task in tasks)
         finally:
-            for client in self.clients:
-                client.disconnect()
-            for client in self.clients:
-                client.loop_stop()
+            self.close()
 
-    @staticmethod
-    def get_dict_by_topic(unit, topic_name):
-        for item in unit.get("unit_ios") or []:
-            if (
-                item.get("topic_name") == topic_name
-                and item.get("type") == "Output"
-            ):
-                return item
-        available = [
-            item.get("topic_name") for item in unit.get("unit_ios") or []
-        ]
-        raise ValueError(
-            f"Unit {unit.get('uuid')} has no output topic {topic_name!r}; "
-            f"available topics: {available}"
-        )
-
-    @classmethod
-    def validate_unit(cls, unit):
-        env = unit.get("env")
-        required = (
-            "PU_AUTH_TOKEN",
-            "PU_MQTT_HOST",
-            "PU_MQTT_PORT",
-            "PU_DOMAIN",
-        )
-        if not isinstance(env, dict) or any(
-            not env.get(key) for key in required
-        ):
-            raise ValueError(
-                f"Unit {unit.get('uuid')} has missing or invalid MQTT env"
-            )
-        cls.get_dict_by_topic(unit, OUTPUT_TOPIC)
+    def close(self) -> None:
+        for client in self.clients:
+            client.disconnect()
+        for client in self.clients:
+            client.loop_stop()

@@ -1,5 +1,7 @@
 #!/bin/bash
 
+trap 'exit 0' TERM INT
+
 REPO_CACHE_PATH="${PU_SAVE_REPO_PATH:-repo_cache}"
 
 if ! mkdir -p -- "$REPO_CACHE_PATH" || [ ! -w "$REPO_CACHE_PATH" ]; then
@@ -44,35 +46,41 @@ rm -f tmp/data_pipe.supervisor.pid
 
 export PROMETHEUS_MULTIPROC_DIR="${PU_PROMETHEUS_MULTIPROC_DIR:-./prometheus_metrics}"
 
-DATA_PIPE_PID=""
+gunicorn_pid=""
+stopping=0
 
-stop_data_pipe() {
-  if [ -z "${DATA_PIPE_PID}" ]; then
-    return
+stop_gunicorn() {
+  stopping=1
+  if [ -n "$gunicorn_pid" ]; then
+    kill -TERM "$gunicorn_pid" 2>/dev/null || true
   fi
-  if kill -0 "$DATA_PIPE_PID" 2>/dev/null; then
-    kill -TERM -"$DATA_PIPE_PID" 2>/dev/null \
-      || kill -TERM "$DATA_PIPE_PID" 2>/dev/null \
-      || true
-    wait "$DATA_PIPE_PID" 2>/dev/null || true
-  fi
-  DATA_PIPE_PID=""
 }
 
-trap stop_data_pipe EXIT
+trap stop_gunicorn TERM INT
 
-while true; do
-  python -m app.configs.datapipe_process &
-  DATA_PIPE_PID=$!
+while [ "$stopping" -eq 0 ]; do
   gunicorn app.main:app \
       --bind 0.0.0.0:5000 \
       --config gunicorn_conf.py \
       --timeout 300 \
       --workers=$PU_WORKER_COUNT \
       --worker-class uvicorn.workers.UvicornWorker \
-      --worker-tmp-dir=/dev/shm
-  status=$?
-  stop_data_pipe
+      --worker-tmp-dir=/dev/shm &
+  gunicorn_pid=$!
+  if [ "$stopping" -eq 1 ]; then
+    stop_gunicorn
+  fi
+  while true; do
+    wait "$gunicorn_pid"
+    status=$?
+    if ! kill -0 "$gunicorn_pid" 2>/dev/null; then
+      break
+    fi
+  done
+  gunicorn_pid=""
+  if [ "$stopping" -eq 1 ]; then
+    break
+  fi
   if [ ! -f tmp/instance_restart ]; then
     exit "$status"
   fi
@@ -80,3 +88,4 @@ while true; do
   rm -f tmp/instance_restart
   rm -f tmp/*.lock
 done
+exit 0

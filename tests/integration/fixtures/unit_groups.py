@@ -36,7 +36,7 @@ def live_unit_groups(live_units, regular_user_token, database):
             [
                 live_units.universal_manual_unit,
                 live_units.universal_auto_unit,
-                live_units.compile_unit,
+                live_units.auxiliary_unit,
             ],
         ),
         _create_group(

@@ -87,7 +87,9 @@ class PeerService:
     SCAN_ALL_COOLDOWN = timedelta(minutes=10)
 
     BLOCKING_STATUS_CODES = (403, 451)
-    INTEGRATION_TEST_COMMAND = "uv run pytest tests -v"
+    INTEGRATION_TEST_COMMAND = (
+        "uv run pytest tests/integration -c tests/pytest.ini -v"
+    )
 
     def __init__(
         self,

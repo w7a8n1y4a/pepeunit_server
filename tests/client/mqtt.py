@@ -1,200 +1,92 @@
 import asyncio
 import json
-import os
-import tarfile
-import tempfile
 import threading
 import time
-import zlib
-from collections import namedtuple
+from pathlib import Path
 
 from pepeunit_client import PepeunitClient
-from pepeunit_client.enums import (
-    BaseOutputTopicType,
-    RestartMode,
-    SearchScope,
-    SearchTopicType,
-)
-from pepeunit_client.file_manager import FileManager
+from pepeunit_client.enums import BaseOutputTopicType, RestartMode
+
+from app.dto.enum import StaticRepoFileName
+
+COUNTER_INPUT = "input_counter"
+COUNTER_OUTPUT = "output_counter"
+UNIT_ROOT = Path("tmp/test_units")
 
 
-def _extract_pepeunit_archive(file_path: str, extract_path: str) -> None:
-    """The library writes every archive to /tmp/temp_update.tar.
-
-    The integration emulators update together, so that shared path mixes
-    one unit's env and schema into another unit's directory.
-    """
-    with open(file_path, "rb") as handle:
-        producer = zlib.decompressobj(wbits=9)
-        tar_data = producer.decompress(handle.read()) + producer.flush()
-
-    descriptor, tar_filepath = tempfile.mkstemp(suffix=".tar")
-    os.close(descriptor)
-    try:
-        with open(tar_filepath, "wb") as tar_file:
-            tar_file.write(tar_data)
-        with tarfile.open(tar_filepath, "r") as tar:
-            tar.extractall(extract_path, filter="data")
-    finally:
-        os.remove(tar_filepath)
-
-
-FileManager.extract_pepeunit_archive = staticmethod(_extract_pepeunit_archive)
-
-# QoS 0 publish returns success once the packet is queued. Right after connect
-# that packet is often dropped, so the first minute repeats state instead of
-# waiting a full PU_STATE_SEND_INTERVAL.
-_STARTUP_STATE_INTERVAL = 2
+class EmulatorPepeunitClient(PepeunitClient):
+    def _restart_program(self) -> None:
+        self._reload_after_update()
 
 
 class MQTTClient:
     def __init__(self, unit):
-        self.unit = unit
-        self.client: PepeunitClient | None = None
-        self._running = False
-        self._thread: threading.Thread | None = None
-        self._connected_since: float | None = None
-
-        self.env_file = f"tmp/test_units/{unit.uuid}/env.json"
-        self.schema_file = f"tmp/test_units/{unit.uuid}/schema.json"
-        self.log_file = f"tmp/test_units/{unit.uuid}/log.json"
-
-        self.client = PepeunitClient(
-            env_file_path=self.env_file,
-            schema_file_path=self.schema_file,
-            log_file_path=self.log_file,
+        self.directory = UNIT_ROOT / str(unit.uuid)
+        self.running = threading.Event()
+        self.running.set()
+        self.client = EmulatorPepeunitClient(
+            env_file_path=str(self.directory / StaticRepoFileName.ENV),
+            log_file_path=str(self.directory / "log.json"),
             enable_mqtt=True,
-            enable_rest=True,
-            restart_mode=RestartMode.ENV_SCHEMA_ONLY,
-            ff_version_check_enable=False
+            restart_mode=RestartMode.ENV_TOPICS_ONLY,
+            ff_version_check_enable=False,
+            ff_console_log_enable=False,
         )
-        # Reset always does os.execv; keep the pytest process alive.
-        self.client._restart_program = lambda: None
-        original_update = self.client._update_env_schema_only
-
-        def update_env_schema_and_report_state() -> None:
-            original_update()
-            self.client._last_state_send = 0
-            self._connected_since = None
-
-        self.client._update_env_schema_only = update_env_schema_and_report_state
         self.client.set_mqtt_input_handler(self.mqtt_input_handler)
+        self.connected_since = None
 
-    @staticmethod
-    def mqtt_input_handler(client: PepeunitClient, msg):
-        try:
-            topic_parts = msg.topic.split("/")
-
-            if len(topic_parts) == 3:
-                domain, unit_io_uuid, _ = topic_parts
-
-                topic_name = client.schema.find_topic_by_unit_node(
-                    msg.topic, SearchTopicType.FULL_NAME, SearchScope.INPUT
-                )
-
-                if topic_name == "input/pepeunit":
-                    value = msg.payload
-                    try:
-                        value = int(value)
-                        if value == 0:
-                            log_state = {
-                                "value": value,
-                                "input_topic": topic_parts,
-                                "timestamp": time.time(),
-                            }
-                            with open(
-                                f"tmp/test_units/{client.settings.unit_uuid}/log_state.json", "w"
-                            ) as f:
-                                json.dump(log_state, f, indent=4)
-
-                            client.publish_to_topics("output/pepeunit", str(value))
-
-                    except ValueError:
-                        pass
-
-        except Exception as e:
-            print(f"Error in mqtt_input_handler: {e}")
-
-    async def publish_messages(self):
-        msg_count = 1
-        while self._running:
-            try:
-                current_time = time.time()
-                if (
-                    current_time - self.client.settings.DELAY_PUB_MSG
-                ) >= self.client.settings.DELAY_PUB_MSG:
-                    msg = f"{msg_count // 10}"
-                    self.client.publish_to_topics("output/pepeunit", msg)
-                    msg_count += 1
-
-                self._report_state()
-
-                await asyncio.sleep(0.25)
-
-            except Exception as e:
-                self.client.logger.error(f"Error in publish_messages: {e}")
-                await asyncio.sleep(1)
-
-    def _report_state(self) -> None:
-        """Publish state after the broker has accepted the connection.
-
-        For the first PU_STATE_SEND_INTERVAL of a connection, repeat every
-        couple of seconds. A queued QoS 0 publish can still be dropped, and
-        the backend keeps the first state it stores.
-        """
-        mqtt = self.client.mqtt_client
-        paho = mqtt._client if mqtt else None
-        if paho is None or not paho.is_connected():
-            if self._connected_since is not None:
-                self.client._last_state_send = 0
-            self._connected_since = None
+    def mqtt_input_handler(self, client: PepeunitClient, msg) -> None:
+        if client.io_topics.input_name(msg.topic) != COUNTER_INPUT:
             return
+        if json.loads(msg.payload) != 0:
+            return
+        record = {
+            "value": 0,
+            "input_topic": msg.topic,
+            "timestamp": time.time(),
+        }
+        destination = self.directory / "log_state.json"
+        pending = destination.with_suffix(".tmp")
+        pending.write_text(json.dumps(record), encoding="utf-8")
+        pending.replace(destination)
+        client.publish_to_topics(COUNTER_OUTPUT, "0")
 
+    def report_state(self) -> None:
         now = time.time()
-        if self._connected_since is None:
-            self._connected_since = now
+        if self.connected_since is None:
+            self.connected_since = now
             self.client._last_state_send = 0
-
         interval = self.client.settings.PU_STATE_SEND_INTERVAL
         gap = (
-            _STARTUP_STATE_INTERVAL
-            if now - self._connected_since < interval
+            min(interval, 2)
+            if now - self.connected_since < interval
             else interval
         )
         if now - self.client._last_state_send < gap:
             return
-
-        topics = self.client.schema.output_base_topic.get(
-            BaseOutputTopicType.STATE_PEPEUNIT.value
-        )
-        if not topics:
-            return
-
         payload = json.dumps(self.client.get_system_state())
-        info = paho.publish(topics[0], payload)
-        if info.rc == 0:
+        info = self.client.publish_to_topics(
+            BaseOutputTopicType.STATE.value, payload
+        )
+        if info is not None and info.rc == 0:
             self.client._last_state_send = now
 
-    async def run(self):
+    async def run(self) -> None:
+        count = 0
         try:
-            self._running = True
-            self.client.mqtt_client.connect()
-            self.client.subscribe_all_schema_topics()
-            await self.publish_messages()
-        except Exception as e:
-            self.client.logger.error(f"Exception: {e}")
+            self.client.connect()
+            while self.running.is_set():
+                if self.client.mqtt_client._client.is_connected():
+                    self.client.publish_to_topics(
+                        COUNTER_OUTPUT, str(count // 10)
+                    )
+                    self.report_state()
+                    count += 1
+                else:
+                    self.connected_since = None
+                await asyncio.sleep(0.25)
         finally:
-            self._running = False
+            self.client.mqtt_client.disconnect()
 
-    def stop(self):
-        self._running = False
-        if self.client:
-            self.client.logger.info("Stopping Pepeunit client")
-
-
-if __name__ == "__main__":
-    UnitType = namedtuple("Unit", ["uuid"])
-    test_unit = UnitType(uuid="a3946222-3ac9-4d2e-b366-5c258cf70471")
-
-    mqtt_client = MQTTClient(test_unit)
-    asyncio.run(mqtt_client.run())
+    def stop(self) -> None:
+        self.running.clear()

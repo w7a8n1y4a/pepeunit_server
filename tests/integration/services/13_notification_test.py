@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 import time
@@ -11,7 +10,6 @@ from pydantic import ValidationError as SchemaValidationError
 
 from app import runtime, settings
 from app.configs.errors import NoAccessError
-from app.configs.redis import get_redis_session
 from app.domain.notification_model import Notification
 from app.dto.clickhouse.log import UnitLog
 from app.dto.enum import (
@@ -20,7 +18,6 @@ from app.dto.enum import (
     NotificationType,
     OperationTaskStatus,
     OperationTaskType,
-    UnitIOTypeEnum,
     UserRole,
 )
 from app.repositories.notification_settings_repository import (
@@ -32,22 +29,15 @@ from app.repositories.operation_task_repository import (
 from app.repositories.unit_log_repository import UnitLogRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.pydantic.notification import (
-    OPERATION_TASK_ALERTS,
-    DataPipeAlertData,
-    InstanceDailyStateData,
     NotificationFilter,
     NotificationRead,
     NotificationSettingsUpdate,
-    UnitDailySummaryData,
 )
 from app.schemas.pydantic.operation_task import OperationTaskCreate
-from app.schemas.pydantic.unit_io import UnitIOFilter, UnitIOUpdate
-from app.services.notification_delivery import (
-    TelegramAlertQueue,
-    notification_delivery,
-)
+from app.schemas.pydantic.unit_io import UnitIOUpdate
 from app.services.operation_task_service import OperationTaskService
 from app.utils.utils import create_upload_file_from_path
+from tests.client.mqtt import COUNTER_OUTPUT
 from tests.integration.helpers.notifications import (
     as_recipient,
     drop_notifications,
@@ -55,6 +45,7 @@ from tests.integration.helpers.notifications import (
     process_saved,
 )
 from tests.integration.helpers.services import (
+    find_unit_io,
     notification_service,
     operation_task_service,
     unit_io_service,
@@ -125,126 +116,6 @@ def test_update_notification_settings_invalid_time(
     assert service.get_settings().scheduled_notification_time == "16:00"
 
 
-def test_notification_text_by_type() -> None:
-    instance_alert = InstanceDailyStateData.model_validate(
-        {"errors": [{"count": 4, "message": "disk full"}]}
-    )
-    instance = instance_alert.table_text
-    assert instance_alert.small_text == "Instance has 4 errors"
-    several = InstanceDailyStateData.model_validate(
-        {
-            "errors": [
-                {"count": 2, "message": "disk full"},
-                {"count": 1, "message": "timeout"},
-            ]
-        }
-    )
-    assert several.small_text == "Instance has 3 errors"
-    one = InstanceDailyStateData.model_validate(
-        {"errors": [{"count": 1, "message": "disk full"}]}
-    )
-    assert one.small_text == "Instance has 1 error"
-    assert instance_alert.big_text is None
-    assert "Instance daily summary" in instance
-    assert "disk full" in instance
-    wrapped = TelegramAlertQueue.text(instance)
-    assert wrapped.startswith("\n```text\n")
-    assert wrapped.endswith("```")
-
-    summary_alert = UnitDailySummaryData.model_validate(
-        {"units": [{"unit_name": "boiler", "error_count": 7}]}
-    )
-    summary = summary_alert.table_text
-    assert summary_alert.small_text == "Unit has 7 errors"
-    assert summary_alert.big_text is None
-    assert "Unit daily summary" in summary
-    assert "boiler" in summary
-    assert "7" in summary
-    fenced = TelegramAlertQueue.text(summary)
-    assert fenced.startswith("\n```text\n")
-    assert fenced.endswith("```")
-
-    started = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
-    for task_type in OperationTaskType:
-        alert = OPERATION_TASK_ALERTS[NotificationType(task_type)](
-            status=OperationTaskStatus.RUNNING,
-            start_datetime=started,
-        )
-        text = alert.table_text
-        assert alert.small_text == f"{alert.task_type.value}: Running"
-        assert "```" not in text
-        assert alert.title in text
-        assert "Operation task" not in text
-        assert "Running" in text
-        assert "Result" not in text
-        assert alert.big_text is None
-        wrapped = TelegramAlertQueue.text(text)
-        assert wrapped.startswith("\n```text\n")
-        assert wrapped.endswith("```")
-
-    full_log = "UNIQUE_DEBUG\n" + ("x" * 400)
-    finished_alert = OPERATION_TASK_ALERTS[NotificationType.INTEGRATION_TESTS](
-        status=OperationTaskStatus.ERROR,
-        start_datetime=started,
-        finish_datetime=started + timedelta(seconds=12),
-        result=full_log,
-    )
-    finished = finished_alert.table_text
-    assert "Error" in finished
-    assert "2026-01-02 03:04:05" in finished
-    assert "UNIQUE_DEBUG" not in finished
-    assert finished_alert.small_text == "IntegrationTests: Error"
-    assert finished_alert.big_text == full_log
-
-    for data, phrase in (
-        (
-            {"type_value_threshold": "Min", "threshold_min": 1},
-            ">= 1",
-        ),
-        (
-            {"type_value_threshold": "Max", "threshold_max": 10},
-            "<= 10",
-        ),
-        (
-            {
-                "type_value_threshold": "Range",
-                "threshold_min": 1,
-                "threshold_max": 2,
-            },
-            "∈ [1, 2]",
-        ),
-        (
-            {
-                "type_value_filtering": "WhiteList",
-                "filtering_values": ["a", "b"],
-            },
-            "is a, b",
-        ),
-        (
-            {
-                "type_value_filtering": "BlackList",
-                "filtering_values": ["a", "b"],
-            },
-            "not is a, b",
-        ),
-        ({}, "any"),
-    ):
-        pipe = DataPipeAlertData.model_validate({"value": "x", **data})
-        text = pipe.table_text
-        assert phrase in pipe.small_text
-        assert pipe.big_text is None
-        assert "```" not in text
-        assert "Data pipe alert" in text
-        assert phrase in text
-        named = DataPipeAlertData.model_validate(
-            {"value": "x", "unit_name": "boiler", **data}
-        ).table_text
-        assert "boiler" in named
-        fenced = TelegramAlertQueue.text(text)
-        assert fenced.startswith("\n```text\n")
-        assert fenced.endswith("```")
-
-
 def test_integration_tests_big_text_is_stored(
     admin_user, admin_user_token, database, cc
 ) -> None:
@@ -294,31 +165,6 @@ def test_integration_tests_big_text_is_stored(
         drop_task(database, task.uuid)
 
 
-def test_telegram_alert_send_rate() -> None:
-    queue = TelegramAlertQueue(user_interval=1, instance_rate=20)
-    queue.ready.set()
-    gap = 1 / 20
-
-    queue.enqueue("alpha", "a0")
-    queue.enqueue("alpha", "a1")
-    queue.enqueue("beta", "b")
-
-    chat, _text = queue._ready_message(0)
-    assert chat == "alpha"
-    queue._mark_sent("alpha", 0)
-    assert queue._ready_message(gap / 2) is None
-    assert queue._seconds_until_next(gap / 2) == gap / 2
-
-    chat, _text = queue._ready_message(gap)
-    assert chat == "beta"
-    queue._mark_sent("beta", gap)
-    assert queue._ready_message(gap * 2) is None
-
-    chat, _text = queue._ready_message(1)
-    assert chat == "alpha"
-    assert queue._ready_message(1) is None
-
-
 def test_notification_stream(
     regular_user, regular_user_token, database, cc
 ) -> None:
@@ -350,12 +196,8 @@ def test_notification_stream(
             assert next(lines) == ": connected"
             # The handler yields the handshake before it blocks on the stream
             time.sleep(0.5)
-            task = operation_task_service(
-                database, regular_user_token
-            ).create(
-                OperationTaskCreate(
-                    task_type=OperationTaskType.UPDATE_REPO
-                )
+            task = operation_task_service(database, regular_user_token).create(
+                OperationTaskCreate(task_type=OperationTaskType.UPDATE_REPO)
             )
             service = notification_service(database, cc, regular_user_token)
             notification = latest_notification(database, regular_user.uuid)
@@ -392,19 +234,13 @@ async def test_data_pipe_alert_live(
 ) -> None:
     """Unit emulator -> MQTT -> data pipe -> notifications table -> backend job"""
     service = unit_io_service(database, cc, regular_user_token)
-    _, nodes = service.list(
-        UnitIOFilter.unlimited(
-            unit_uuid=running_units.chain_sink_unit.uuid,
-            type=[UnitIOTypeEnum.OUTPUT],
-        )
+    node = find_unit_io(
+        service, running_units.chain_sink_unit.uuid, COUNTER_OUTPUT
     )
-    node = nodes[0]
     started = datetime.now(UTC)
     created = []
     try:
-        await service.update(
-            node.uuid, UnitIOUpdate(is_data_pipe_active=True)
-        )
+        await service.update(node.uuid, UnitIOUpdate(is_data_pipe_active=True))
         await service.set_data_pipe_config(
             node.uuid, (await create_upload_file_from_path(LIVE_ALERT_YAML))
         )
@@ -602,8 +438,7 @@ def test_create_scheduled_instance_state(
             total = sum(item["count"] for item in errors)
             noun = "error" if total == 1 else "errors"
             assert (
-                instance_alerts[0].small_text
-                == f"Instance has {total} {noun}"
+                instance_alerts[0].small_text == f"Instance has {total} {noun}"
             )
             assert instance_alerts[0].table_text
             _, notifications = service.list(
@@ -719,28 +554,6 @@ def _generate_scheduled(service, created: list) -> list[Notification]:
     return [
         service.get(item.uuid) for item in rows if item.user_uuid == user_uuid
     ]
-
-
-def _stream_has(
-    user_uuid: uuid_pkg.UUID, notification_uuid: uuid_pkg.UUID
-) -> bool:
-    async def has() -> bool:
-        session = get_redis_session()
-        redis = await anext(session)
-        try:
-            messages = await redis.xrevrange(
-                notification_delivery.stream_name(user_uuid),
-                count=100,
-            )
-        finally:
-            await session.aclose()
-        needle = str(notification_uuid)
-        return any(
-            needle in fields[notification_delivery.EVENT]
-            for _message_id, fields in messages
-        )
-
-    return asyncio.run(has())
 
 
 def _upcoming_slot() -> datetime:

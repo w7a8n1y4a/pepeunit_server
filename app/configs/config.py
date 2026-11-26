@@ -295,6 +295,7 @@ class MqttSettings(SettingsValidationMixin, BaseModel):
 
     pu_mqtt_username: str = Field(max_length=128)
     pu_mqtt_password: str = Field(max_length=128)
+    pu_mqtt_redis_auth_url: str | None = Field(default=None, max_length=1024)
 
     pu_mqtt_http_type: str = "https"
 
@@ -307,6 +308,15 @@ class MqttSettings(SettingsValidationMixin, BaseModel):
     @classmethod
     def validate_mqtt_secret(cls, value: str, info: ValidationInfo) -> str:
         return cls.require_non_empty(value, cls.env_name(info))
+
+    @field_validator("pu_mqtt_redis_auth_url")
+    @classmethod
+    def validate_mqtt_redis_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return cls.require_url(
+            value, ("redis", "rediss"), "PU_MQTT_REDIS_AUTH_URL"
+        )
 
     @model_validator(mode="after")
     def compute_mqtt_http_type(self):
@@ -371,7 +381,12 @@ class IntegrationTestSettings(SettingsValidationMixin, BaseModel):
         return self
 
 
-class LoadTestSettings(BaseModel):
+class LoadTestSettings(SettingsValidationMixin, BaseModel):
+    pu_test_load_mqtt_repo_url: str = Field(
+        default="https://git.pepemoss.com/pepe/pepeunit/units/universal_load_unit.git",
+        max_length=1024,
+    )
+
     pu_test_load_mqtt_duration: int = Field(default=120, ge=1, le=3600)
     pu_test_load_mqtt_unit_count: int = Field(default=100, ge=1, le=1024)
     pu_test_load_mqtt_rps: int = Field(default=200, ge=1, le=1024)
@@ -390,6 +405,11 @@ class LoadTestSettings(BaseModel):
     locust_users: int = Field(default=400, ge=1, le=8192)
     locust_run_time: int = Field(default=120, ge=1, le=3600)
     locust_spawn_rate: int = Field(default=10, ge=1, le=8192)
+
+    @field_validator("pu_test_load_mqtt_repo_url")
+    @classmethod
+    def validate_load_repo_url(cls, value: str) -> str:
+        return cls.require_http_url(value, "PU_TEST_LOAD_MQTT_REPO_URL")
 
 
 class Settings(

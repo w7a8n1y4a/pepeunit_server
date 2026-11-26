@@ -1394,7 +1394,7 @@ wheels = [
 
 [[package]]
 name = "pepeunit-backend"
-version = "1.5.0"
+version = "1.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiogram" },
@@ -1478,7 +1478,7 @@ requires-dist = [
     { name = "paho-mqtt", specifier = ">=2.1.0" },
     { name = "paho-mqtt", marker = "extra == 'load'", specifier = ">=2.1.0" },
     { name = "pathspec", specifier = ">=0.12.1" },
-    { name = "pepeunit-client", specifier = ">=1.1.2", index = "https://test.pypi.org/simple/" },
+    { name = "pepeunit-client", specifier = "==1.5.1", index = "https://test.pypi.org/simple/" },
     { name = "pillow", specifier = ">=13.0.0" },
     { name = "pint", specifier = ">=0.25,<0.26" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.8.0" },
@@ -1512,15 +1512,16 @@ provides-extras = ["dev", "load"]
 
 [[package]]
 name = "pepeunit-client"
-version = "1.3.0"
+version = "1.5.1"
 source = { registry = "https://test.pypi.org/simple/" }
 dependencies = [
     { name = "cryptography" },
     { name = "psutil", marker = "platform_system != 'emscripten'" },
+    { name = "pyyaml" },
 ]
-sdist = { url = "https://test-files.pythonhosted.org/packages/3a/a3/366cc6c8a42afdabc56c4f3e1b130d118328535e7bfddeb99a44a1049a31/pepeunit_client-1.3.0.tar.gz", hash = "sha256:361260ffaea30b239adc7d08fe15c1e3a52aa748867d56f32dd66d6964059794", size = 28665, upload-time = "2026-09-12T04:15:33.592Z" }
+sdist = { url = "https://test-files.pythonhosted.org/packages/76/bc/39f9d7c2f14c53662404d2b22344d7120d9b814f94ac58db4d991b988b22/pepeunit_client-1.5.1.tar.gz", hash = "sha256:e027df5ba53f33f4c5624db020210e708a5964f66ef5683b6f1f3b0d6fa655fb", size = 29195, upload-time = "2026-11-26T02:52:31.1Z" }
 wheels = [
-    { url = "https://test-files.pythonhosted.org/packages/9a/46/f72a8993bcfbdbf2814426f9ab32c8b6c5900bd5147f27d54aaf52aa44c4/pepeunit_client-1.3.0-py3-none-any.whl", hash = "sha256:2dd3a367b6ec697a81baa80c968444ead0237ffb069d5f5e35d59277c41d1906", size = 30436, upload-time = "2026-09-12T04:15:32.359Z" },
+    { url = "https://test-files.pythonhosted.org/packages/ca/83/7d7ae3287ba1deeb4afce5b65b75b416ca99b51537ddba8ac659c0452e62/pepeunit_client-1.5.1-py3-none-any.whl", hash = "sha256:d2cfb60e9e110f1b33ebe9ae6da490fc8f87cf576b89084939b120023f40cb7c", size = 31159, upload-time = "2026-11-26T02:52:29.198Z" },
 ]
 
 [[package]]

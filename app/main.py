@@ -14,6 +14,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from app import BackendLogLevel, runtime, settings
 from app.configs.errors import CustomException
 from app.configs.logging_config import setup_logging
+from app.configs.rest import get_unit_service
 from app.configs.utils import recreate_directory
 from app.routers.v1.endpoints import api_router
 from app.schemas.bot.control_bot_router import ControlBotRouter
@@ -31,6 +32,7 @@ from app.schemas.bot.unit_io_bot_router import UnitIOBotRouter
 from app.schemas.bot.unit_log_bot_router import UnitLogBotRouter
 from app.schemas.bot.utils import build_telegram_bot
 from app.schemas.mqtt.manager import mqtt_manager
+from app.services.mqtt_auth_service import MqttAuthService
 from app.services.startup_service import StartupService
 
 setup_logging()
@@ -42,6 +44,7 @@ if runtime.get().pu_ff_prometheus_enable:
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    _app.state.mqtt_auth_service = MqttAuthService(get_unit_service)
     startup = StartupService(
         _app,
         mqtt_manager,

@@ -2,29 +2,31 @@ import random
 
 from locust import HttpUser, between, task
 
-from app import runtime, settings
+from app import settings
 from app.dto.enum import PeerTrustStatus
 
-REST_INSTANCES = f"{settings.pu_app_prefix}{settings.pu_api_v1_prefix}/instances"
+REST_INSTANCES = (
+    f"{settings.pu_app_prefix}{settings.pu_api_v1_prefix}/instances"
+)
 REST_PEERS = f"{settings.pu_app_prefix}{settings.pu_api_v1_prefix}/peers"
-ERROR_CODES = f"{settings.pu_app_prefix}{settings.pu_api_v1_prefix}/error_codes"
+ERROR_CODES = (
+    f"{settings.pu_app_prefix}{settings.pu_api_v1_prefix}/error_codes"
+)
 
 TRUST_STATUS_REST = [item.value for item in PeerTrustStatus]
 
 
-def _random_pagination() -> dict:
+def _random_pagination(max_page_size: int) -> dict:
     filters = {}
     if random.choice((True, False)):
         filters["offset"] = random.randint(0, 30)
     if random.choice((True, False)):
-        filters["limit"] = random.randint(
-            1, min(100, runtime.get().pu_instance_max_pagination_size)
-        )
+        filters["limit"] = random.randint(1, min(100, max_page_size))
     return filters
 
 
-def random_rest_filters() -> dict:
-    params = _random_pagination()
+def random_rest_filters(max_page_size: int) -> dict:
+    params = _random_pagination(max_page_size)
     if random.choice((True, False)):
         params["trust_status"] = random.sample(
             TRUST_STATUS_REST,
@@ -35,20 +37,41 @@ def random_rest_filters() -> dict:
 
 class InstanceBaseUser(HttpUser):
     abstract = True
-    host = f"{settings.pu_http_type}://{settings.pu_domain}"
+    host = settings.pu_link
     wait_time = between(1, 1)
 
 
 class InstanceRestUser(InstanceBaseUser):
+    max_page_size = 1
+
+    def on_start(self):
+        self.current()
+
     @task
     def current(self):
-        self.client.get(f"{REST_INSTANCES}/current")
+        with self.client.get(
+            f"{REST_INSTANCES}/current", catch_response=True
+        ) as response:
+            if response.status_code != 200:
+                response.failure(f"status {response.status_code}")
+                return
+            try:
+                self.max_page_size = response.json()["settings"][
+                    "pu_instance_max_pagination_size"
+                ]
+                if self.max_page_size < 1:
+                    msg = "Invalid instance pagination limit"
+                    raise ValueError(msg)
+            except TypeError, ValueError, KeyError:
+                response.failure(
+                    "Instance portrait has no valid pagination limit"
+                )
 
     @task
     def peers(self):
         self.client.get(
             REST_PEERS,
-            params=random_rest_filters(),
+            params=random_rest_filters(self.max_page_size),
             name=REST_PEERS,
         )
 
@@ -56,7 +79,7 @@ class InstanceRestUser(InstanceBaseUser):
     def urls(self):
         self.client.get(
             f"{REST_PEERS}/urls",
-            params=random_rest_filters(),
+            params=random_rest_filters(self.max_page_size),
             name=f"{REST_PEERS}/urls",
         )
 
@@ -64,7 +87,7 @@ class InstanceRestUser(InstanceBaseUser):
     def repos(self):
         self.client.get(
             f"{REST_PEERS}/repos",
-            params=random_rest_filters(),
+            params=random_rest_filters(self.max_page_size),
             name=f"{REST_PEERS}/repos",
         )
 

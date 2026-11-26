@@ -27,8 +27,8 @@ def owner_setting(database, user: User, token: str, name: str, value):
         service = instance_settings_service(database, token)
         original = getattr(service.get(), name)
         service.update(InstanceSettingsUpdate(**{name: value}))
-        wait_runtime(name, value)
         try:
+            wait_runtime(name, value)
             yield
         finally:
             service.update(InstanceSettingsUpdate(**{name: original}))

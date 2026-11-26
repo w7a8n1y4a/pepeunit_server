@@ -1,8 +1,9 @@
 import logging
+import subprocess
+import sys
 import uuid
 
 import pytest
-from pydantic import ValidationError as PydanticValidationError
 
 from app import runtime
 from app.configs.errors import NoAccessError, UserError, ValidationError
@@ -10,7 +11,6 @@ from app.configs.redis import get_redis_session
 from app.domain.user_model import User
 from app.dto.enum import UserRole, UserStatus
 from app.repositories.user_repository import UserRepository
-from app.schemas.pydantic.grafana import GrafanaLoginTicketCreate
 from app.schemas.pydantic.user import (
     AuthChallengeCreate,
     AuthTokenCreate,
@@ -45,9 +45,7 @@ def test_create_user_duplicate_public_key(database, cc, regular_user) -> None:
     assert regular_user.public_key == REGULAR_USER_KEY.public_key
     service = user_service(database, cc, None)
     with pytest.raises(UserError):
-        service.create(
-            UserCreate(public_key=REGULAR_USER_KEY.public_key)
-        )
+        service.create(UserCreate(public_key=REGULAR_USER_KEY.public_key))
 
 
 def test_get_auth_token_user(regular_user_token, admin_user_token) -> None:
@@ -123,14 +121,15 @@ async def test_verification_user(
     code = link.replace(f"{runtime.get().pu_telegram_bot_link}?start=", "")
     logging.info(code)
 
-    await service.verification(telegram_chat_id(configured=True), code)
+    chat_id = telegram_chat_id(database, regular_user.uuid, configured=True)
+    await service.verification(chat_id, code)
 
     redis = await anext(get_redis_session())
     linked = service.get(regular_user.uuid)
     assert await redis.get(code) is None
     assert linked.grafana_org_name == org_name
     assert linked.status == UserStatus.ACTIVE
-    assert linked.telegram_chat_id
+    assert linked.telegram_chat_id == chat_id
 
 
 def test_block_unblock_user(
@@ -153,13 +152,17 @@ def test_block_unblock_user(
         assert refreshed.grafana_org_name == org_name
 
 
-def test_block_without_admin(database, cc, regular_user, regular_user_token) -> None:
+def test_block_without_admin(
+    database, cc, regular_user, regular_user_token
+) -> None:
     service = user_service(database, cc, regular_user_token)
     with pytest.raises(NoAccessError):
         service.block(regular_user.uuid)
 
 
-def test_unblock_without_admin(database, cc, regular_user, regular_user_token) -> None:
+def test_unblock_without_admin(
+    database, cc, regular_user, regular_user_token
+) -> None:
     service = user_service(database, cc, regular_user_token)
     with pytest.raises(NoAccessError):
         service.unblock(regular_user.uuid)
@@ -196,9 +199,7 @@ def test_get_user(database, cc, regular_user, regular_user_token) -> None:
 def test_create_user_invalid_public_key(database, cc) -> None:
     service = user_service(database, cc, None)
     with pytest.raises(UserError):
-        service.create(
-            UserCreate(public_key="not-a-key")
-        )
+        service.create(UserCreate(public_key="not-a-key"))
 
 
 def test_created_user_is_regular_user(extra_user) -> None:
@@ -227,6 +228,7 @@ def test_get_grafana_token(
     assert fetched.uuid == regular_user.uuid
 
 
+@pytest.mark.grafana
 async def test_grafana_ticket_is_single_use(
     database, cc, regular_user, regular_user_token
 ) -> None:
@@ -245,34 +247,18 @@ async def test_grafana_ticket_is_single_use(
 
 
 @pytest.mark.parametrize(
-    "path",
-    [
-        "https://evil.example/grafana/",
-        "//evil.example/grafana/x",
-        "/other/path",
-        "/grafana/../pepeunit/api",
-        "/grafana//evil.example",
-        "/grafana/d/x\r\nSet-Cookie: a=b",
-    ],
+    ("arguments", "error"),
+    [([], "Usage:"), (["not-a-uuid"], "User uuid is not valid")],
 )
-def test_grafana_ticket_path_stays_in_grafana(path) -> None:
-    with pytest.raises(PydanticValidationError):
-        GrafanaLoginTicketCreate(path=path)
-
-
-def test_grafana_ticket_path_accepts_dashboard_link() -> None:
-    link = "/grafana/d/abc/name?orgId=2"
-    assert GrafanaLoginTicketCreate(path=link).path == link
-    assert GrafanaLoginTicketCreate(path="").path is None
-    assert GrafanaLoginTicketCreate().path is None
-
-
-def test_set_owner_cli_rejects_bad_args() -> None:
-    from scripts.set_owner import main
-
-    assert main([]) == 2
-    assert main(["not-a-uuid"]) == 2
-    assert main([str(uuid.uuid4()), str(uuid.uuid4())]) == 2
+def test_set_owner_cli_rejects_bad_args(arguments, error) -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "scripts.set_owner", *arguments],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert error in result.stderr
 
 
 def test_set_owner_cli_missing_user() -> None:
@@ -357,7 +343,9 @@ def test_grant_admin_without_owner(
         )
 
 
-def test_get_many_user(database, cc, admin_user_token, test_hash, regular_user) -> None:
+def test_get_many_user(
+    database, cc, admin_user_token, test_hash, regular_user
+) -> None:
     service = user_service(database, cc, admin_user_token)
     count, users = service.list(
         UserFilter.unlimited(

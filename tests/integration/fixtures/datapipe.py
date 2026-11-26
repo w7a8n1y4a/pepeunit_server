@@ -2,10 +2,9 @@ import asyncio
 
 import pytest
 
-from app.dto.enum import UnitIOTypeEnum
-from app.schemas.pydantic.unit_io import UnitIOFilter, UnitIOUpdate
-from app.utils.utils import create_upload_file_from_path
-from tests.integration.helpers.services import unit_io_service
+from tests.client.mqtt import COUNTER_INPUT, COUNTER_OUTPUT
+from tests.integration.helpers.data_pipe import activate_pipe
+from tests.integration.helpers.services import find_unit_io, unit_io_service
 
 PIPE_YAMLS = {
     "universal_manual_unit": "tests/data/yaml/integra/data_pipe_aggregation.yaml",
@@ -16,15 +15,9 @@ PIPE_YAMLS = {
 
 
 async def _activate_and_set_pipe(service, unit, yaml_path: str | None) -> None:
-    for node_type in (UnitIOTypeEnum.OUTPUT, UnitIOTypeEnum.INPUT):
-        _, nodes = service.list(
-            UnitIOFilter.unlimited(unit_uuid=unit.uuid, type=[node_type])
-        )
-        await service.update(nodes[0].uuid, UnitIOUpdate(is_data_pipe_active=True))
-        if yaml_path:
-            await service.set_data_pipe_config(
-                nodes[0].uuid, (await create_upload_file_from_path(yaml_path))
-            )
+    for topic in (COUNTER_OUTPUT, COUNTER_INPUT):
+        node = find_unit_io(service, unit.uuid, topic)
+        await activate_pipe(service, node.uuid, yaml_path)
 
 
 @pytest.fixture(scope="session")
@@ -33,7 +26,10 @@ def piped_units(running_units, regular_user_token, database, cc):
 
     async def _setup() -> None:
         mapping = [
-            (running_units.universal_manual_unit, PIPE_YAMLS["universal_manual_unit"]),
+            (
+                running_units.universal_manual_unit,
+                PIPE_YAMLS["universal_manual_unit"],
+            ),
             (running_units.last_value_unit, PIPE_YAMLS["last_value_unit"]),
             (running_units.n_records_unit, PIPE_YAMLS["n_records_unit"]),
             (running_units.time_window_unit, PIPE_YAMLS["time_window_unit"]),

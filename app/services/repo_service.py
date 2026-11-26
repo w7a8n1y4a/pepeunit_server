@@ -620,7 +620,7 @@ class RepoService:
         self, repo: Repo, child_unit_count: int
     ) -> RepoRead:
         try:
-            branches = self.git_repo_repository.get_branches(repo)
+            branches = GitRepoRepository(local_only=True).get_branches(repo)
         except Exception:
             branches = []
 

@@ -12,6 +12,7 @@ from clickhouse_migrations.clickhouse_cluster import ClickhouseCluster
 from fastapi import FastAPI
 
 from app import runtime, settings
+from app.configs.datapipe_process import DataPipeProcess
 from app.configs.emqx import ControlEmqx
 from app.configs.utils import acquire_file_lock, wait_for_file_unlock
 from app.dto.agent.abc import AgentBackend
@@ -39,6 +40,7 @@ class StartupService:
         self.mqtt = mqtt
         self.bot = bot
         self.dp = dp
+        self.data_pipe = DataPipeProcess()
         self._init_lock = None
         self._bot_tasks: list[asyncio.Task] = []
         self._instance_tasks: list[asyncio.Task] = []
@@ -51,10 +53,14 @@ class StartupService:
         wait_for_file_unlock(FileLock.MQTT_RUN)
         await self._start_every_worker()
         await self._start_telegram_alert_queue()
+        if self._init_lock is not None:
+            self.data_pipe.start()
         self._start_singleton()
 
     async def stop(self) -> None:
         try:
+            if self._init_lock is not None:
+                await asyncio.to_thread(self.data_pipe.stop)
             await self._cancel_tasks(self._bot_tasks, "Telegram bot")
             await self._cancel_tasks(self._instance_tasks, "instance")
             await self._cancel_tasks(self._singleton_tasks, "singleton")

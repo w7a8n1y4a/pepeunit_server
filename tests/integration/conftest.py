@@ -1,6 +1,4 @@
 import asyncio
-import queue
-import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -57,53 +55,34 @@ def test_hash() -> str:
     return TEST_HASH
 
 
-class ClientEmulatorThread(threading.Thread):
-    units: int
+class ClientEmulator:
+    def __init__(self) -> None:
+        self.executor = ThreadPoolExecutor()
+        self.clients = {}
+        self.futures = []
 
-    def __init__(self):
-        super().__init__(daemon=True)
-        self.task_queue = queue.Queue()
-        self.result_queue = queue.Queue()
-        self.running = True
-        self.executor = ThreadPoolExecutor(max_workers=10)
-        self.clients = []
+    def start_units(self, units) -> None:
+        for unit in units:
+            client = MQTTClient(unit)
+            self.clients[unit.uuid] = client
+            self.futures.append(
+                self.executor.submit(asyncio.run, client.run())
+            )
 
-    def run(self):
-        while self.running:
-            try:
-                task = self.task_queue.get(timeout=1)
+    def require_running(self) -> None:
+        for future in self.futures:
+            if future.done():
+                future.result()
+                raise RuntimeError("MQTT emulator stopped unexpectedly")
 
-                if isinstance(task, list):
-                    for unit in task:
-                        thread = threading.Thread(
-                            target=self.start_mqtt_client, args=(unit,), daemon=True
-                        )
-                        self.clients.append(thread)
-                        thread.start()
-
-                    self.result_queue.put({"run_client": [unit.uuid for unit in task]})
-                if task == "STOP":
-                    break
-
-                self.result_queue.put(task)
-            except queue.Empty:
-                pass
-
-    def start_mqtt_client(self, unit):
-        mqtt_client = MQTTClient(unit)
-        asyncio.run(mqtt_client.run())
-
-    def stop(self):
-        self.running = False
-        self.task_queue.put("STOP")
-
+    def stop(self) -> None:
+        for client in self.clients.values():
+            client.stop()
         self.executor.shutdown(wait=True)
 
 
 @pytest.fixture(scope="session")
 def client_emulator():
-    emulator = ClientEmulatorThread()
-    emulator.start()
+    emulator = ClientEmulator()
     yield emulator
     emulator.stop()
-    emulator.join()

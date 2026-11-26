@@ -154,7 +154,9 @@ def test_permission_grants_and_revokes_private_access(
             resource_type=PermissionEntities.UNIT,
         )
     )
-    assert extra_units.get(private_crud_unit.uuid).uuid == private_crud_unit.uuid
+    assert (
+        extra_units.get(private_crud_unit.uuid).uuid == private_crud_unit.uuid
+    )
     _, units = extra_units.list(UnitFilter(uuids=[private_crud_unit.uuid]))
     assert any(unit[0].uuid == private_crud_unit.uuid for unit in units)
 
@@ -188,21 +190,23 @@ def test_cannot_delete_creator_permission(
 
 
 def test_cannot_delete_unit_self_permission(
-    compile_unit, regular_user_token, database
+    auxiliary_unit, regular_user_token, database
 ) -> None:
     with pytest.raises(CustomPermissionError):
         permission_service(database, regular_user_token).delete(
-            compile_unit.uuid, compile_unit.uuid
+            auxiliary_unit.uuid, auxiliary_unit.uuid
         )
 
 
 def test_cannot_delete_unit_child_node_permission(
-    compile_unit, regular_user_token, database, cc
+    auxiliary_unit, regular_user_token, database, cc
 ) -> None:
     _, nodes = unit_io_service(database, cc, regular_user_token).list(
-        UnitIOFilter(unit_uuid=compile_unit.uuid, type=[UnitIOTypeEnum.INPUT])
+        UnitIOFilter(
+            unit_uuid=auxiliary_unit.uuid, type=[UnitIOTypeEnum.INPUT]
+        )
     )
     with pytest.raises(CustomPermissionError):
         permission_service(database, regular_user_token).delete(
-            compile_unit.uuid, nodes[0].uuid
+            auxiliary_unit.uuid, nodes[0].uuid
         )

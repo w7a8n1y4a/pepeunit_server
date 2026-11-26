@@ -37,6 +37,7 @@ class JwtAuthService(AuthService):
         self.user_repo = user_repo
         self.unit_repo = unit_repo
         self.jwt_token = jwt_token
+        self.has_expiration = False
         if jwt_token:
             self.current_agent = self._decode_token()
         else:
@@ -62,6 +63,7 @@ class JwtAuthService(AuthService):
                 msg, code=ErrorCode.ACCESS_TOKEN_INVALID
             ) from err
 
+        self.has_expiration = "exp" in data
         return self._get_agent_from_token(data)
 
     def _get_agent_from_token(self, data):

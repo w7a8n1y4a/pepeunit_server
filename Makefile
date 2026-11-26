@@ -35,15 +35,15 @@ test-module:
 
 test-integration:
 	@echo "Integration test run..."
-	uv run pytest tests -v
+	uv run pytest tests/integration -c tests/pytest.ini -v
 
 test-load-rest:
 	@echo "REST load test run..."
-	uv run locust -f tests/load/locustfile.py
+	uv run --extra load locust -f tests/load/locustfile.py
 
 test-load-mqtt:
 	@echo "MQTT load test run..."
-	uv run python -m tests.load.load_test_mqtt
+	uv run --extra load python -m tests.load.load_test_mqtt
 
 lint:
 	@echo "Ruff magic run..."

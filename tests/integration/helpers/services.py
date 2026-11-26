@@ -4,6 +4,7 @@ from app import runtime
 from app.configs.rest import (
     get_grafana_service,
     get_icon_service,
+    get_instance_resources_service,
     get_instance_settings_service,
     get_metrics_service,
     get_notification_service,
@@ -17,6 +18,7 @@ from app.configs.rest import (
     get_user_service,
 )
 from app.schemas.pydantic.repo import CommitFilter
+from app.schemas.pydantic.unit_io import UnitIOFilter
 from app.schemas.pydantic.user import AuthChallengeCreate, AuthTokenCreate
 
 
@@ -54,6 +56,10 @@ def permission_service(database, token=None):
 
 def peer_service(database, token=None):
     return get_peer_service(database, token)
+
+
+def instance_resources_service(database, cc, token=None):
+    return get_instance_resources_service(database, cc, token)
 
 
 def instance_settings_service(database, token=None):
@@ -114,7 +120,9 @@ def branch_commits(
     )
 
 
-def all_branch_commits(database, token, repo_uuid, branch, *, only_tag: bool = False):
+def all_branch_commits(
+    database, token, repo_uuid, branch, *, only_tag: bool = False
+):
     return _collect_commits(
         repo_service(database, token), repo_uuid, branch, only_tag, None
     )
@@ -128,9 +136,14 @@ def token_for(database, cc, key) -> str:
             AuthChallengeCreate(hash_public_key=key.hash_public_key)
         )
         return await service.get_token(
-            AuthTokenCreate(
-                challenge=challenge, signature=key.sign(challenge)
-            )
+            AuthTokenCreate(challenge=challenge, signature=key.sign(challenge))
         )
 
     return asyncio.run(_issue())
+
+
+def find_unit_io(service, unit_uuid, topic_name: str):
+    _, nodes = service.list(
+        UnitIOFilter.unlimited(unit_uuid=unit_uuid, search_string=topic_name)
+    )
+    return next(node for node in nodes if node.topic_name == topic_name)

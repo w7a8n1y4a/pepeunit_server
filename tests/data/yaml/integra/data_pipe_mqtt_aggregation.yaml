@@ -1,0 +1,17 @@
+active_period:
+  type: Permanent
+
+filters:
+  type_input_value: Number
+  max_rate: 0
+  last_unique_check: false
+  max_size: 16
+
+transformations:
+  multiplication_ratio: 0.5
+  round_decimal_point: 1
+
+processing_policy:
+  policy_type: Aggregation
+  time_window_size: 60
+  aggregation_functions: Avg

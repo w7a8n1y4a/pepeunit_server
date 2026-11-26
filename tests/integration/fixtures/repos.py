@@ -1,16 +1,26 @@
+import json
 import logging
 import os
+import uuid as uuid_pkg
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from shutil import rmtree
 
 import pytest
+from git import Actor
+from git import Repo as GitRepo
 
 from app import settings
 from app.domain.repo_model import Repo
-from app.dto.enum import GitPlatform, RepoStatus
+from app.dto.enum import GitPlatform, RepoStatus, StaticRepoFileName
 from app.repositories.git_repo_repository import GitRepoRepository
+from app.repositories.icon_repository import IconRepository
 from app.schemas.pydantic.repo import (
     Credentials,
     RepoCreate,
 )
+from app.services.icon_image import IconImage
 from app.utils.utils import ensure_timezone_aware
 from tests.integration.helpers.http import patch_update_local_repository
 from tests.integration.helpers.services import repo_service
@@ -20,16 +30,10 @@ from tests.integration.helpers.wait import wait_until
 def _drop_known_repo(database, url: str) -> None:
     """The repo could return to the database through instance discovery, so it is recreated"""
     git_repo_repository = GitRepoRepository()
-    repos = (
-        database.query(Repo)
-        .where(Repo.repository_url == url)
-        .all()
-    )
+    repos = database.query(Repo).where(Repo.repository_url == url).all()
     for repo in repos:
         git_repo_repository.delete_repo(repo)
-    database.query(Repo).where(
-        Repo.repository_url == url
-    ).delete()
+    database.query(Repo).where(Repo.repository_url == url).delete()
     database.commit()
 
 
@@ -56,7 +60,9 @@ def _create_repo(database, token, spec: dict, *, require_clone: bool = True):
     clone_path = service.git_repo_repository.get_path_physic_repository(repo)
     cloned = os.path.exists(clone_path)
     if require_clone:
-        assert cloned
+        synced = service.get(repo.uuid)
+        assert synced.sync_status == RepoStatus.UPDATED, synced.sync_error
+        assert cloned, f"Repository cache missing for {repo.repository_url}"
     return repo, cloned
 
 
@@ -107,10 +113,12 @@ def wait_repo_sync(database, token, repo, *, timeout: float = 180) -> None:
     """create schedules the sync in the background, the clone does not appear immediately"""
     service = repo_service(database, token)
     wait_until(
-        lambda: service.get(repo.uuid).sync_status
-        in (
-            RepoStatus.UPDATED,
-            RepoStatus.ERROR,
+        lambda: (
+            service.get(repo.uuid).sync_status
+            in (
+                RepoStatus.UPDATED,
+                RepoStatus.ERROR,
+            )
         ),
         timeout=timeout,
         message=f"repo {repo.repository_url} not synced",
@@ -157,6 +165,7 @@ def universal_repo(regular_user_token, database) -> object:
             "platform": GitPlatform.GITLAB,
         },
     )
+    _sync_repos_on_backend(database, regular_user_token, [repo])
     return repo
 
 
@@ -173,7 +182,9 @@ def public_repos(
         gitlab_public_repo,
         universal_repo,
     ]
-    _sync_repos_on_backend(database, regular_user_token, repos)
+    _sync_repos_on_backend(
+        database, regular_user_token, [github_public_repo, gitlab_public_repo]
+    )
     return repos
 
 
@@ -207,3 +218,57 @@ def private_repos(private_repo_enabled, regular_user_token, database) -> list:
 @pytest.fixture(scope="session")
 def private_repo(private_repos):
     return private_repos[0]
+
+
+@dataclass(frozen=True)
+class CompiledRepo:
+    repo: Repo
+    tagged_commit: str
+    untagged_commit: str
+    tag: str
+    asset_url: str
+
+
+@pytest.fixture
+def compiled_repo(tmp_path, regular_user, database) -> CompiledRepo:
+    manifest = Path("tests/data/unit_manifest/unit.yml")
+    origin = GitRepo.init(tmp_path / "origin", initial_branch="main")
+    manifest_name = StaticRepoFileName.UNIT_MANIFEST.value
+    (Path(origin.working_tree_dir) / manifest_name).write_bytes(
+        manifest.read_bytes()
+    )
+    author = Actor("Integration tests", "integration@example.test")
+    origin.index.add([manifest_name])
+    tagged = origin.index.commit(
+        "Compiled manifest", author=author, committer=author
+    )
+    tag = origin.create_tag("fixture-release").name
+    untagged = origin.index.commit(
+        "Untagged version", author=author, committer=author
+    )
+
+    url = f"https://repo.pepeunit.test/{uuid_pkg.uuid4()}.git"
+    asset = "https://repo.pepeunit.test/releases/esp32.bin"
+    icon = IconRepository(database).stage(IconImage.generate(url))
+    now = datetime.now(UTC)
+    repo = Repo(
+        creator_uuid=regular_user.uuid,
+        icon_uuid=icon.uuid,
+        platform=GitPlatform.GITLAB,
+        repository_url=url,
+        sync_status=RepoStatus.UPDATED,
+        create_datetime=now,
+        last_update_datetime=now,
+        releases_data=json.dumps({tag: [["esp32", asset]]}),
+    )
+    path = Path(GitRepoRepository.get_path_physic_repository(repo))
+    GitRepo.clone_from(origin.working_tree_dir, path)
+    database.add(repo)
+    database.commit()
+
+    try:
+        yield CompiledRepo(repo, tagged.hexsha, untagged.hexsha, tag, asset)
+    finally:
+        database.delete(repo)
+        database.commit()
+        rmtree(path, ignore_errors=True)

@@ -1,5 +1,5 @@
 from clickhouse_driver import Client
-from fastapi import Depends
+from fastapi import Depends, Request
 from sqlmodel import Session
 
 from app import runtime
@@ -52,6 +52,7 @@ from app.services.icon_service import IconService
 from app.services.instance_resources_service import InstanceResourcesService
 from app.services.instance_settings_service import InstanceSettingsService
 from app.services.metrics_service import MetricsService
+from app.services.mqtt_auth_service import MqttAuthService
 from app.services.notification_service import NotificationService
 from app.services.operation_task_service import OperationTaskService
 from app.services.peer_service import PeerService
@@ -357,10 +358,14 @@ def get_unit_group_service(
 
 def get_unit_service(
     db: Session = Depends(get_session),
-    client: Client = Depends(get_clickhouse_client),
+    client: Client | None = Depends(get_clickhouse_client),
     jwt_token: str | None = Depends(token_depends),
 ) -> UnitService:
     return create_service_factory(db, client, jwt_token).get_unit_service()
+
+
+def get_mqtt_auth_service(request: Request) -> MqttAuthService:
+    return request.app.state.mqtt_auth_service
 
 
 def get_unit_io_service(

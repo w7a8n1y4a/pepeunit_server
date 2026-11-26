@@ -1,13 +1,24 @@
 import logging
 import time
+from hashlib import sha256
 
 import httpx
 from pydantic import JsonValue
+from redis.asyncio import Redis
+from redis.asyncio.connection import ConnectionPool, parse_url
 
 from app import runtime, settings
+from app.dto.agent.abc import AgentBackend
+from app.dto.enum import MqttAction
 
 
 class ControlEmqx:
+    AUTH_CACHE_MAX_SIZE = 1024
+    AUTH_CACHE_TTL = "10m"
+    REDIS_ACL_PREFIX = "mqtt_acl"
+    REDIS_DEFAULT_PORT = 6379
+    REDIS_POOL_SIZE = 8
+
     current_link: str
 
     @staticmethod
@@ -45,12 +56,53 @@ class ControlEmqx:
         }
 
     async def init(self) -> None:
+        redis_auth = await self.prepare_backend_acl()
         await self.set_auth_settings()
         await self.delete_auth_hooks()
         await self.set_file_auth_hook()
         await self.set_http_auth_hook()
+        await self.set_auth_hook("redis", redis_auth)
         await self.set_tcp_listener_settings()
         await self.set_global_mqtt_settings()
+
+    async def prepare_backend_acl(self) -> dict[str, JsonValue]:
+        token = AgentBackend(name=settings.pu_domain).generate_agent_token()
+        acl_prefix = (
+            f"{self.REDIS_ACL_PREFIX}:{sha256(token.encode()).hexdigest()}"
+        )
+        redis_url = settings.pu_mqtt_redis_auth_url or settings.pu_redis_url
+        broker_redis = parse_url(redis_url)
+        database = broker_redis.get("db", 0)
+        instance = runtime.get()
+        redis_options = parse_url(settings.pu_redis_url)
+        redis_options.update(
+            db=database,
+            socket_connect_timeout=instance.pu_instance_http_connect_timeout,
+            socket_timeout=instance.pu_instance_http_timeout,
+        )
+        async with Redis.from_pool(ConnectionPool(**redis_options)) as redis:
+            await redis.hset(
+                f"{acl_prefix}:{token}",
+                f"eq {settings.pu_domain}/+",
+                MqttAction.SUBSCRIBE.value,
+            )
+
+        host = broker_redis["host"]
+        if ":" in host:
+            host = f"[{host}]"
+        port = broker_redis.get("port", self.REDIS_DEFAULT_PORT)
+        return {
+            "enable": True,
+            "server": f"{host}:{port}",
+            "redis_type": "single",
+            "pool_size": self.REDIS_POOL_SIZE,
+            "username": broker_redis.get("username", ""),
+            "password": broker_redis.get("password", ""),
+            "database": database,
+            "auto_reconnect": True,
+            "ssl": {"enable": redis_url.startswith("rediss://")},
+            "cmd": f"HGETALL {acl_prefix}:${{username}}",
+        }
 
     @staticmethod
     def is_broker_reachable(status_code: int) -> bool:
@@ -154,7 +206,12 @@ class ControlEmqx:
         data = {
             "no_match": "deny",
             "deny_action": "ignore",
-            "cache": {"enable": False},
+            "cache": {
+                "enable": True,
+                "max_size": self.AUTH_CACHE_MAX_SIZE,
+                "ttl": self.AUTH_CACHE_TTL,
+                "excludes": [],
+            },
         }
         logging.info("Set authorization settings MQTT Broker")
         async with httpx.AsyncClient(

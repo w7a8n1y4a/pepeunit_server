@@ -1,6 +1,5 @@
 import uvicorn
 
-from app.configs.datapipe_process import DataPipeProcess
 from app.configs.job_stop import JobStopWatchdog
 from app.configs.logging_config import _build_logging_config
 from app.configs.restart import restart
@@ -13,8 +12,6 @@ def main() -> None:
     # A flag left by a crashed reboot must not restart a manual stop.
     restart.discard()
     runtime.invalidate()
-    data_pipe = DataPipeProcess()
-    data_pipe.start()
     watchdog = JobStopWatchdog()
     watchdog.start()
     try:
@@ -32,7 +29,6 @@ def main() -> None:
         )
     finally:
         watchdog.stop()
-        data_pipe.stop()
     if not restart.consume():
         return
     restart.reexec()

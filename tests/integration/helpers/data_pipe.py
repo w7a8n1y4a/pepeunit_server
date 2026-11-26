@@ -9,7 +9,9 @@ from io import StringIO
 from fastapi import UploadFile
 
 from app.dto.enum import ProcessingPolicyType
-from app.schemas.pydantic.unit_io import DataPipeFilter
+from app.schemas.pydantic.unit_io import DataPipeFilter, UnitIOUpdate
+from app.services.unit_io_service import UnitIOService
+from app.utils.utils import create_upload_file_from_path
 from app.validators.data_pipe import is_valid_data_pipe_config
 
 CSV_DIR = "tmp/csv"
@@ -53,7 +55,9 @@ def pipe_rows(policy: ProcessingPolicyType) -> list[dict]:
                     {
                         "state": json.dumps(
                             {
-                                "level": random.choice(["error", "info", "warning"]),
+                                "level": random.choice(
+                                    ["error", "info", "warning"]
+                                ),
                                 "TitleMessage": random.choice(
                                     ["Test Info One", "Test Info Two"]
                                 ),
@@ -132,3 +136,17 @@ async def seed_pipe_node(service, unit_io, *, force: bool = True) -> None:
             return
 
     await upload_pipe_csv(service, unit_io.uuid, policy)
+
+
+async def activate_pipe(
+    service: UnitIOService, unit_io_uuid: uuid_pkg.UUID, yaml_path: str | None
+) -> None:
+    await service.update(unit_io_uuid, UnitIOUpdate(is_data_pipe_active=True))
+    if yaml_path is None:
+        return
+
+    upload = await create_upload_file_from_path(yaml_path)
+    try:
+        await service.set_data_pipe_config(unit_io_uuid, upload)
+    finally:
+        await upload.close()

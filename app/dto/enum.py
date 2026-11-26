@@ -242,6 +242,11 @@ class FieldFormat(str, enum.Enum):
     UUID = "uuid"
 
 
+class MqttAction(str, enum.Enum):
+    PUBLISH = "publish"
+    SUBSCRIBE = "subscribe"
+
+
 class MqttQos(int, enum.Enum):
     AT_MOST_ONCE = 0
     AT_LEAST_ONCE = 1

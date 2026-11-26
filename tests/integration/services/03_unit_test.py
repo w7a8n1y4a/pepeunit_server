@@ -5,10 +5,10 @@ import os
 import re
 import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
-from io import BytesIO
 
+import httpx
 import pytest
-from starlette.datastructures import UploadFile
+from pepeunit_client.file_manager import FileManager
 
 from app import runtime, settings
 from app.configs.clickhouse import get_clickhouse_client
@@ -17,21 +17,20 @@ from app.configs.errors import (
     GitRepoError,
     MqttError,
     NoAccessError,
-    ReadmeGenerationError,
     RepoError,
     UnitError,
+    ValidationError,
 )
 from app.dto.agent.abc import AgentBackend
 from app.dto.clickhouse.log import UnitLog
 from app.dto.enum import (
     BackendTopicCommand,
-    DestinationTopicType,
-    GlobalPrefixTopic,
     LogLevel,
     OperationTaskStatus,
     OperationTaskType,
     OrderByDate,
     ReservedEnvVariableName,
+    StaticRepoFileName,
     UnitIOTypeEnum,
     VisibilityLevel,
 )
@@ -42,18 +41,22 @@ from app.schemas.pydantic.unit import (
     UnitLogFilter,
     UnitUpdate,
 )
-from app.schemas.pydantic.unit_io import UnitIOFilter
 from app.services.utils import get_topic_name
 from app.utils.utils import aes_gcm_encode
+from tests.client.mqtt import COUNTER_INPUT, COUNTER_OUTPUT, UNIT_ROOT
 from tests.integration.helpers.http import (
+    api_request,
     get_unit_logs_file,
+    mqtt_authorization,
     patch_unit_commit,
     post_bulk_update_units,
+    post_schema_update,
     post_unit_command,
 )
 from tests.integration.helpers.names import unique_name
 from tests.integration.helpers.services import (
     branch_commits,
+    find_unit_io,
     repo_service,
     unit_io_service,
     unit_service,
@@ -94,7 +97,9 @@ def test_create_unit_same_name_other_user(
         )
     )
     try:
-        assert unit.creator_uuid != live_units.universal_manual_unit.creator_uuid
+        assert (
+            unit.creator_uuid != live_units.universal_manual_unit.creator_uuid
+        )
     finally:
         service.delete(unit.uuid)
 
@@ -115,18 +120,14 @@ def test_create_unit_unknown_branch(
 
 
 def test_delete_repo_with_unit(
-    universal_repo, compile_unit, regular_user_token, database
+    universal_repo, auxiliary_unit, regular_user_token, database
 ) -> None:
     repo_svc = repo_service(database, regular_user_token)
-    with pytest.raises(
-        RepoError, match="Repo still has units"
-    ):
+    with pytest.raises(RepoError, match="Repo still has units"):
         repo_svc.delete(universal_repo.uuid)
 
 
-def test_update_unit_name(
-    crud_unit, regular_user_token, database, cc
-) -> None:
+def test_update_unit_name(crud_unit, regular_user_token, database, cc) -> None:
     service = unit_service(database, cc, regular_user_token)
     original = crud_unit.name
     new_name = unique_name("unm")
@@ -153,14 +154,22 @@ def test_update_unit_visibility(
     logging.info(universal_manual_unit.uuid)
 
     service.update(
-        universal_manual_unit.uuid, UnitUpdate(visibility_level=VisibilityLevel.INTERNAL)
+        universal_manual_unit.uuid,
+        UnitUpdate(visibility_level=VisibilityLevel.INTERNAL),
     )
-    assert service.get(universal_manual_unit.uuid).visibility_level == VisibilityLevel.INTERNAL
+    assert (
+        service.get(universal_manual_unit.uuid).visibility_level
+        == VisibilityLevel.INTERNAL
+    )
 
     service.update(
-        universal_manual_unit.uuid, UnitUpdate(visibility_level=VisibilityLevel.PUBLIC)
+        universal_manual_unit.uuid,
+        UnitUpdate(visibility_level=VisibilityLevel.PUBLIC),
     )
-    assert service.get(universal_manual_unit.uuid).visibility_level == VisibilityLevel.PUBLIC
+    assert (
+        service.get(universal_manual_unit.uuid).visibility_level
+        == VisibilityLevel.PUBLIC
+    )
 
 
 def test_update_unit_auto_flags(
@@ -200,7 +209,9 @@ def test_update_unit_not_creator(
         )
 
 
-def test_env_unit(universal_auto_unit, live_units, regular_user_token, database, cc) -> None:
+def test_env_unit(
+    universal_auto_unit, live_units, regular_user_token, database, cc
+) -> None:
     service = unit_service(database, cc, regular_user_token)
     count = len(service.get_env(universal_auto_unit.uuid).keys())
     logging.info(f"{count}")
@@ -219,33 +230,40 @@ def test_env_unit(universal_auto_unit, live_units, regular_user_token, database,
         assert count_before <= count_after
 
 
-def test_reset_env(universal_auto_unit, regular_user_token, database, cc) -> None:
+def test_reset_env(
+    universal_auto_unit, regular_user_token, database, cc
+) -> None:
     service = unit_service(database, cc, regular_user_token)
     current_env = service.get_env(universal_auto_unit.uuid)
     old_env = copy.deepcopy(current_env)
 
     service.reset_env(universal_auto_unit.uuid)
     service.set_env(
-        universal_auto_unit.uuid, json.dumps(service.get_env(universal_auto_unit.uuid))
+        universal_auto_unit.uuid,
+        json.dumps(service.get_env(universal_auto_unit.uuid)),
     )
     new_env = service.get_env(universal_auto_unit.uuid)
-    assert old_env.get(ReservedEnvVariableName.PU_SECRET_KEY.value) != new_env.get(
+    assert old_env.get(
         ReservedEnvVariableName.PU_SECRET_KEY.value
-    )
+    ) != new_env.get(ReservedEnvVariableName.PU_SECRET_KEY.value)
 
 
-def test_get_firmware(unpacked_firmwares, compile_unit, regular_user_token, database, cc) -> None:
+def test_get_firmware(
+    unpacked_firmwares, auxiliary_unit, regular_user_token, database, cc
+) -> None:
     service = unit_service(database, cc, regular_user_token)
     with pytest.raises(UnitError):
-        service.get_unit_firmware_tgz(compile_unit.uuid, 35, 9)
+        service.get_unit_firmware_tgz(auxiliary_unit.uuid, 35, 9)
     with pytest.raises(UnitError):
-        service.get_unit_firmware_tgz(compile_unit.uuid, 9, 13)
+        service.get_unit_firmware_tgz(auxiliary_unit.uuid, 9, 13)
 
-    target_version = service.get_target_version(compile_unit.uuid)
+    target_version = service.get_selected_version(auxiliary_unit.uuid)
     assert target_version.commit != ""
 
 
-def test_state_storage(universal_auto_unit, regular_user_token, database, cc) -> None:
+def test_state_storage(
+    universal_auto_unit, regular_user_token, database, cc
+) -> None:
     service = unit_service(database, cc, regular_user_token)
     state = "test"
     service.set_state_storage(universal_auto_unit.uuid, state)
@@ -253,7 +271,8 @@ def test_state_storage(universal_auto_unit, regular_user_token, database, cc) ->
 
     with pytest.raises(CipherError):
         service.set_state_storage(
-            universal_auto_unit.uuid, "t" * (runtime.get().pu_instance_cipher_max_length + 1)
+            universal_auto_unit.uuid,
+            "t" * (runtime.get().pu_instance_cipher_max_length + 1),
         )
 
 
@@ -264,49 +283,40 @@ def test_run_infrastructure_contour(running_units) -> None:
 def test_hand_update_firmware_unit(
     running_units, regular_user_token, database, cc
 ) -> None:
-    token = regular_user_token
-    logging.info(f"User token: {token}")
-    service = unit_service(database, cc, token)
+    service = unit_service(database, cc, regular_user_token)
     target_units = running_units.firmware_manual()
-
-    target_versions = []
+    expected_ssid = "archive-update"
     for unit in target_units:
-        logging.info(unit.uuid)
-        _read, commits = branch_commits(
-            database,
-            token,
-            unit.repo_uuid,
-            only_tag=unit.is_only_tag_update,
-            count=2,
+        selected = service.get_selected_version(unit.uuid)
+        service.set_env(
+            unit.uuid, json.dumps({"PUC_WIFI_SSID": expected_ssid})
         )
-        target_version = commits[1].commit
-        target_versions.append(target_version)
-        logging.info(f"{unit.name}, {unit.uuid},{target_version}")
-        assert patch_unit_commit(token, unit, target_version) < 400
-
-    expected = {
-        unit.uuid: version
-        for unit, version in zip(target_units, target_versions, strict=True)
-    }
+        assert (
+            patch_unit_commit(regular_user_token, unit, selected.commit) == 200
+        )
 
     def all_updated() -> bool:
         return all(
-            service.get(unit.uuid).current_commit_version == expected[unit.uuid]
+            FileManager.read_env(
+                str(UNIT_ROOT / str(unit.uuid) / StaticRepoFileName.ENV)
+            )["PUC_WIFI_SSID"]
+            == expected_ssid
             for unit in target_units
         )
 
     wait_until(
         all_updated,
-        timeout=runtime.get().pu_instance_unit_state_send_interval * 2 + 10,
-        message="hand firmware update did not reach target commit",
-        session=database,
+        timeout=40,
+        message="firmware archive did not update the emulators' .env files",
     )
 
 
 def test_hand_update_bad_commit(
     running_units, chain_source_unit, regular_user_token
 ) -> None:
-    assert patch_unit_commit(regular_user_token, chain_source_unit, "test") >= 400
+    assert (
+        patch_unit_commit(regular_user_token, chain_source_unit, "test") >= 400
+    )
     assert (
         patch_unit_commit(
             regular_user_token,
@@ -325,7 +335,6 @@ def test_hand_update_with_bad_env(
 
     env_dict = service.get_env(universal_manual_unit.uuid)
     del env_dict["PU_SECRET_KEY"]
-    logging.info(env_dict)
 
     update_unit = service.get(universal_manual_unit.uuid)
     update_unit.cipher_env_dict = aes_gcm_encode(json.dumps(env_dict))
@@ -334,56 +343,50 @@ def test_hand_update_with_bad_env(
     _, commits = branch_commits(
         database, token, universal_manual_unit.repo_uuid
     )
-    assert patch_unit_commit(token, universal_manual_unit, commits[0].commit) == 200
+    assert (
+        patch_unit_commit(token, universal_manual_unit, commits[0].commit)
+        == 200
+    )
 
 
 def test_auto_update_firmware_unit(
     running_units, admin_user_token, regular_user_token, database, cc
 ) -> None:
-    token = regular_user_token
-    service = unit_service(database, cc, token)
-    source, middle, sink = running_units.chain()
-    _, commits = branch_commits(database, token, source.repo_uuid)
-    target_version = commits[0].commit
-    assert patch_unit_commit(token, source, target_version) < 400
+    service = unit_service(database, cc, regular_user_token)
+    target_units = running_units.chain()[1:]
+    expected_ssid = "bulk-update"
+    for unit, tagged in zip(target_units, (False, True), strict=True):
+        service.update(
+            unit.uuid,
+            UnitUpdate(is_auto_update_unit=True, is_only_tag_update=tagged),
+        )
+        selected = service.get_selected_version(unit.uuid)
+        _, commits = branch_commits(
+            database, regular_user_token, unit.repo_uuid, only_tag=tagged
+        )
+        assert selected.commit == commits[0].commit
+        if tagged:
+            assert selected.tag is not None
+            assert selected.tag == commits[0].tag
+        service.set_env(
+            unit.uuid, json.dumps({"PUC_WIFI_SSID": expected_ssid})
+        )
 
-    wait_until(
-        lambda: service.get(source.uuid).current_commit_version == target_version,
-        timeout=runtime.get().pu_instance_unit_state_send_interval * 2 + 10,
-        message="hand unit update did not reach unit commit",
-        session=database,
-    )
-
-    service.update(
-        middle.uuid,
-        UnitUpdate(is_auto_update_unit=True, is_only_tag_update=False),
-    )
-    service.update(
-        sink.uuid,
-        UnitUpdate(is_auto_update_unit=True, is_only_tag_update=True),
-    )
     assert post_bulk_update_units(admin_user_token) < 400
 
-    repo_svc = repo_service(database, token)
-    repo = repo_svc.read(source.repo_uuid)
-    commits_with_tag = service.git_repo_repository.get_branch_commits_with_tag(
-        repo, source.target_branch
-    )
-    tags = service.git_repo_repository.get_tags_from_all_commits(commits_with_tag)
-    tag_commit = tags[0]["commit"]
-
     def bulk_reached() -> bool:
-        middle_commit = service.get(middle.uuid).current_commit_version
-        sink_commit = service.get(sink.uuid).current_commit_version
-        logging.info((middle_commit, sink_commit, target_version, tag_commit))
-        return middle_commit == target_version and sink_commit == tag_commit
+        return all(
+            FileManager.read_env(
+                str(UNIT_ROOT / str(unit.uuid) / StaticRepoFileName.ENV)
+            )["PUC_WIFI_SSID"]
+            == expected_ssid
+            for unit in target_units
+        )
 
     wait_until(
         bulk_reached,
-        timeout=runtime.get().pu_instance_unit_state_send_interval * 2 + 10,
-        interval=2,
-        message="bulk unit update did not reach chain units",
-        session=database,
+        timeout=40,
+        message="bulk firmware update did not reach both auto-update emulators",
     )
 
 
@@ -398,35 +401,64 @@ def test_env_update_command(
     current_env["PU_MIN_LOG_LEVEL"] = "Info"
     service.set_env(chain_sink_unit.uuid, json.dumps(current_env))
 
-    assert post_unit_command(token, chain_sink_unit, BackendTopicCommand.ENV_UPDATE) < 400
+    assert (
+        post_unit_command(
+            token, chain_sink_unit, BackendTopicCommand.ENV_UPDATE
+        )
+        < 400
+    )
 
-    filepath = f"tmp/test_units/{chain_sink_unit.uuid}/env.json"
+    filepath = UNIT_ROOT / str(chain_sink_unit.uuid) / StaticRepoFileName.ENV
 
     def env_updated() -> bool:
-        with open(filepath) as handle:
-            return json.loads(handle.read())["PU_MIN_LOG_LEVEL"] == "Info"
+        return (
+            FileManager.read_env(str(filepath))["PU_MIN_LOG_LEVEL"] == "Info"
+        )
 
     wait_until(
         env_updated,
         timeout=30,
         interval=2,
-        message="env.json was not updated on unit",
+        message=".env was not updated on unit",
     )
 
 
-def test_log_sync_command(running_units, chain_middle_unit, regular_user_token) -> None:
+def test_schema_update_command(
+    running_units, chain_sink_unit, client_emulator, regular_user_token
+) -> None:
+    client = client_emulator.clients[chain_sink_unit.uuid].client
+    previous = client.io_topics
+    assert post_schema_update(regular_user_token, chain_sink_unit.uuid) == 204
+    wait_until(
+        lambda: client.io_topics is not previous,
+        timeout=20,
+        message="SDK did not fetch new IO topics after SchemaUpdate",
+    )
+    assert client.io_topics == previous
+
+
+def test_log_sync_command(
+    running_units, chain_middle_unit, regular_user_token
+) -> None:
     token = regular_user_token
     client = next(get_clickhouse_client())
     try:
         unit_log_repository = UnitLogRepository(client)
         logging.info(chain_middle_unit.uuid)
-        assert post_unit_command(token, chain_middle_unit, BackendTopicCommand.LOG_SYNC) < 400
+        assert (
+            post_unit_command(
+                token, chain_middle_unit, BackendTopicCommand.LOG_SYNC
+            )
+            < 400
+        )
 
         wait_until(
-            lambda: unit_log_repository.list(
-                UnitLogFilter(uuid=chain_middle_unit.uuid, level=["Info"])
-            )[0]
-            > 0,
+            lambda: (
+                unit_log_repository.list(
+                    UnitLogFilter(uuid=chain_middle_unit.uuid, level=["Info"])
+                )[0]
+                > 0
+            ),
             timeout=30,
             interval=2,
             message="LOG_SYNC did not produce Info rows in ClickHouse",
@@ -435,17 +467,26 @@ def test_log_sync_command(running_units, chain_middle_unit, regular_user_token) 
         client.disconnect()
 
 
-def test_reset_command(running_units, chain_sink_unit, regular_user_token) -> None:
+def test_reset_command(
+    running_units, chain_sink_unit, regular_user_token
+) -> None:
     token = regular_user_token
     client = next(get_clickhouse_client())
     try:
         unit_log_repository = UnitLogRepository(client)
         logging.info(chain_sink_unit.uuid)
-        assert post_unit_command(token, chain_sink_unit, BackendTopicCommand.RESET) < 400
+        assert (
+            post_unit_command(
+                token, chain_sink_unit, BackendTopicCommand.RESET
+            )
+            < 400
+        )
 
         def reset_logged() -> bool:
             _, logs = unit_log_repository.list(
-                UnitLogFilter.unlimited(uuid=chain_sink_unit.uuid, level=["Info"])
+                UnitLogFilter.unlimited(
+                    uuid=chain_sink_unit.uuid, level=["Info"]
+                )
             )
             return any("Reset command received" in log.text for log in logs)
 
@@ -556,8 +597,12 @@ def test_download_unit_logs(
         os.remove(log_path)
 
     lines = content.splitlines()
-    first_line = next(line for line in lines if line.endswith(f" - {first_text}"))
-    second_line = next(line for line in lines if line.endswith(f" - {second_text}"))
+    first_line = next(
+        line for line in lines if line.endswith(f" - {first_text}")
+    )
+    second_line = next(
+        line for line in lines if line.endswith(f" - {second_text}")
+    )
     assert first_line.startswith("INFO - ")
     assert second_line.startswith("ERROR - ")
     assert lines.index(first_line) < lines.index(second_line)
@@ -571,7 +616,9 @@ def test_download_unit_logs(
         )
     )
     assert len(lines) == stored_count
-    assert lines[: len(first_page)] == [log.to_log_line() for log in first_page]
+    assert lines[: len(first_page)] == [
+        log.to_log_line() for log in first_page
+    ]
 
     log_line_pattern = re.compile(
         r"^(DEBUG|INFO|WARNING|ERROR|CRITICAL) - "
@@ -581,59 +628,20 @@ def test_download_unit_logs(
 
     response = get_unit_logs_file(regular_user_token, unit)
     assert response.status_code == 200
-    assert f'filename="{unit.name}.log"' in response.headers["content-disposition"]
+    assert (
+        f'filename="{unit.name}.log"'
+        in response.headers["content-disposition"]
+    )
     assert response.text == content
 
 
 @pytest.mark.asyncio
-async def test_convert_toml_file_to_md(regular_user_token, database, cc) -> None:
-    service = unit_service(database, cc, regular_user_token)
-
-    def upload(content: bytes, name: str) -> UploadFile:
-        return UploadFile(file=BytesIO(content), filename=name)
-
-    tests_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    base_toml_dir = os.path.join(tests_dir, "data", "toml")
-
-    toml_path = os.path.join(base_toml_dir, "pepeunit.toml")
-    with open(toml_path, "rb") as handle:
-        content = handle.read()
-    md = await service.convert_toml_file_to_md(upload(content, "pepeunit.toml"))
-    assert isinstance(md, str)
-    assert md.strip() != ""
-    assert md.lstrip().startswith("# WiFi Temp Sensor ds18b20")
-    assert "Parameter | Implementation" in md
-    assert "## Files" in md
-
-    bad_files = [
-        "bad_size_pepeunit.toml",
-        "bad_syntax_pepeunit.toml",
-        "bad_general_items_pepeunit.toml",
-        "bad_general_text_pepeunit.toml",
-    ]
-    for bad_name in bad_files:
-        with open(os.path.join(base_toml_dir, bad_name), "rb") as handle:
-            bad_content = handle.read()
-        with pytest.raises(ReadmeGenerationError):
-            await service.convert_toml_file_to_md(upload(bad_content, bad_name))
-
-
-def test_get_current_schema(
-    live_units, regular_user_token, database, cc
-) -> None:
-    schema = unit_service(database, cc, regular_user_token).get_current_schema(
-        live_units.universal_auto_unit.uuid
-    )
-    assert DestinationTopicType.INPUT_TOPIC.value in schema
-    assert DestinationTopicType.OUTPUT_TOPIC.value in schema
-
-
 def test_get_firmware_archives(
-    unpacked_firmwares, compile_unit, regular_user_token, database, cc
+    unpacked_firmwares, auxiliary_unit, regular_user_token, database, cc
 ) -> None:
     service = unit_service(database, cc, regular_user_token)
-    zip_path = service.get_unit_firmware_zip(compile_unit.uuid)
-    tar_path = service.get_unit_firmware_tar(compile_unit.uuid)
+    zip_path = service.get_unit_firmware_zip(auxiliary_unit.uuid)
+    tar_path = service.get_unit_firmware_tar(auxiliary_unit.uuid)
     try:
         assert os.path.exists(zip_path)
         assert os.path.exists(tar_path)
@@ -702,104 +710,106 @@ def test_update_units_firmware(
     assert finished.result.startswith("Updated ")
 
 
-def _mqtt_base_topic(unit, destination: DestinationTopicType, name: str = "update") -> str:
-    return (
-        f"{settings.pu_domain}/{destination.value}/{unit.uuid}/"
-        f"{name}{GlobalPrefixTopic.BACKEND_SUB_PREFIX.value}"
-    )
-
-
-def test_mqtt_auth_own_base_topic(
-    compile_unit, regular_user_token, database, cc
+def test_mqtt_auth_checks_action_and_ownership(
+    auxiliary_unit, auxiliary_unit_token, regular_user_token, database, cc
 ) -> None:
-    service = unit_service(database, cc, regular_user_token)
-    unit_token = service.generate_token(compile_unit.uuid)
-    unit_svc = unit_service(database, cc, unit_token)
-    unit_svc.get_mqtt_auth(
-        _mqtt_base_topic(compile_unit, DestinationTopicType.INPUT_BASE_TOPIC)
-    )
-    unit_svc.get_mqtt_auth(
-        _mqtt_base_topic(compile_unit, DestinationTopicType.OUTPUT_BASE_TOPIC)
-    )
+    service = unit_io_service(database, cc, regular_user_token)
+    input_node = find_unit_io(service, auxiliary_unit.uuid, COUNTER_INPUT)
+    output_node = find_unit_io(service, auxiliary_unit.uuid, COUNTER_OUTPUT)
+    input_topic = get_topic_name(input_node.uuid)
+    output_topic = get_topic_name(output_node.uuid)
+    token = auxiliary_unit_token
 
+    with httpx.Client(timeout=runtime.get().http_timeout()) as client:
+        initial = mqtt_authorization(client, token, "subscribe", input_topic)
+        repeated = mqtt_authorization(client, token, "subscribe", input_topic)
+        on_output = mqtt_authorization(client, token, "publish", output_topic)
 
-def test_mqtt_auth_foreign_base_topic(
-    compile_unit, chain_sink_unit, regular_user_token, database, cc
-) -> None:
-    unit_token = unit_service(database, cc, regular_user_token).generate_token(
-        compile_unit.uuid
-    )
-    with pytest.raises(NoAccessError):
-        unit_service(database, cc, unit_token).get_mqtt_auth(
-            _mqtt_base_topic(chain_sink_unit, DestinationTopicType.INPUT_BASE_TOPIC)
+        assert initial == repeated == on_output == "allow"
+        assert (
+            mqtt_authorization(client, token, "publish", input_topic) == "deny"
+        )
+        assert (
+            mqtt_authorization(client, token, "subscribe", output_topic)
+            == "deny"
+        )
+        assert (
+            mqtt_authorization(
+                client, regular_user_token, "subscribe", input_topic
+            )
+            == "deny"
         )
 
 
-def test_mqtt_auth_invalid_destination(
-    compile_unit, regular_user_token, database, cc
-) -> None:
-    unit_token = unit_service(database, cc, regular_user_token).generate_token(
-        compile_unit.uuid
-    )
-    with pytest.raises(NoAccessError):
-        unit_service(database, cc, unit_token).get_mqtt_auth(
-            _mqtt_base_topic(compile_unit, DestinationTopicType.INPUT_TOPIC)
-        )
-
-
-def test_mqtt_auth_invalid_topic_struct(
-    compile_unit, regular_user_token, database, cc
-) -> None:
-    unit_token = unit_service(database, cc, regular_user_token).generate_token(
-        compile_unit.uuid
-    )
-    with pytest.raises(MqttError):
-        unit_service(database, cc, unit_token).get_mqtt_auth(
-            f"{settings.pu_domain}/a/b/c"
-        )
-
-
-def test_mqtt_auth_node_topics(
-    compile_unit,
+def test_mqtt_auth_denies_input_of_another_unit(
+    auxiliary_unit_token,
     chain_sink_unit,
     universal_manual_unit,
     regular_user_token,
     database,
     cc,
 ) -> None:
-    unit_token = unit_service(database, cc, regular_user_token).generate_token(
-        compile_unit.uuid
-    )
-    node_svc = unit_io_service(database, cc, regular_user_token)
-    _, public_nodes = node_svc.list(
-        UnitIOFilter(
-            unit_uuid=universal_manual_unit.uuid, type=[UnitIOTypeEnum.INPUT]
-        )
-    )
-    unit_service(database, cc, unit_token).get_mqtt_auth(
-        get_topic_name(public_nodes[0].uuid, public_nodes[0].topic_name)
-    )
+    service = unit_service(database, cc, auxiliary_unit_token)
+    unit_ios = unit_io_service(database, cc, regular_user_token)
 
-    _, private_nodes = node_svc.list(
-        UnitIOFilter(unit_uuid=chain_sink_unit.uuid, type=[UnitIOTypeEnum.INPUT])
-    )
-    with pytest.raises(NoAccessError):
-        unit_service(database, cc, unit_token).get_mqtt_auth(
-            get_topic_name(private_nodes[0].uuid, private_nodes[0].topic_name)
-        )
+    for unit in (chain_sink_unit, universal_manual_unit):
+        node = find_unit_io(unit_ios, unit.uuid, COUNTER_INPUT)
+        with pytest.raises(NoAccessError):
+            service.get_mqtt_auth(get_topic_name(node.uuid), is_subscribe=True)
 
 
-def test_mqtt_auth_backend_wildcard(regular_user_token, database, cc) -> None:
-    backend_token = AgentBackend(name=settings.pu_domain).generate_agent_token()
-    unit_service(database, cc, backend_token).get_mqtt_auth(
-        f"{settings.pu_domain}/+"
-    )
-
-
-def test_mqtt_auth_user_token_denied(
-    compile_unit, regular_user_token, database, cc
+def test_unit_mqtt_auth_denies_invalid_topics(
+    auxiliary_unit, auxiliary_unit_token, regular_user_token, database, cc
 ) -> None:
+    service = unit_service(database, cc, auxiliary_unit_token)
+    unit_ios = unit_io_service(database, cc, regular_user_token)
+    node = find_unit_io(unit_ios, auxiliary_unit.uuid, COUNTER_INPUT)
+    topic = get_topic_name(node.uuid)
+
+    with pytest.raises(ValidationError):
+        service.get_mqtt_auth(f"{settings.pu_domain}/+", is_subscribe=True)
+
+    for invalid in (
+        f"{topic}/pepeunit",
+        f"foreign/{node.uuid}",
+        topic.upper(),
+    ):
+        with pytest.raises(MqttError):
+            service.get_mqtt_auth(invalid, is_subscribe=True)
+
+
+def test_mqtt_auth_backend_wildcard_and_input(
+    auxiliary_unit, regular_user_token, database, cc
+) -> None:
+    backend_token = AgentBackend(
+        name=settings.pu_domain
+    ).generate_agent_token()
+    service = unit_service(database, cc, backend_token)
+    unit_ios = unit_io_service(database, cc, regular_user_token)
+    input_node = find_unit_io(unit_ios, auxiliary_unit.uuid, COUNTER_INPUT)
+    output_node = find_unit_io(unit_ios, auxiliary_unit.uuid, COUNTER_OUTPUT)
+    input_topic = get_topic_name(input_node.uuid)
+
+    service.get_mqtt_auth(f"{settings.pu_domain}/+", is_subscribe=True)
+    service.get_mqtt_auth(input_topic, is_subscribe=False)
+
     with pytest.raises(NoAccessError):
-        unit_service(database, cc, regular_user_token).get_mqtt_auth(
-            _mqtt_base_topic(compile_unit, DestinationTopicType.INPUT_BASE_TOPIC)
+        service.get_mqtt_auth(input_topic, is_subscribe=True)
+    with pytest.raises(NoAccessError):
+        service.get_mqtt_auth(
+            get_topic_name(output_node.uuid), is_subscribe=False
         )
+
+
+def test_mqtt_auth_rejects_unknown_action(auxiliary_unit_token) -> None:
+    response = api_request(
+        "POST",
+        "/units/auth",
+        params={"action": "connect"},
+        json={
+            "token": auxiliary_unit_token,
+            "topic": f"{settings.pu_domain}/+",
+        },
+    )
+
+    assert response.status_code == 422

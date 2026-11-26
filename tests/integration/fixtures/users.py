@@ -1,7 +1,9 @@
 import asyncio
 import random
+import uuid as uuid_pkg
 
 import pytest
+from sqlmodel import Session
 
 from app import runtime, settings
 from app.domain.user_model import User
@@ -30,11 +32,14 @@ def _create_user(database, cc, login: str, key: UserKey) -> User:
     return stored
 
 
-def telegram_chat_id(*, configured: bool = False) -> str:
-    """Chat id of the data pipe recipient, random when the setting is empty"""
+def telegram_chat_id(
+    database: Session, user_uuid: uuid_pkg.UUID, *, configured: bool = False
+) -> str:
     value = settings.pu_test_integration_telegram_chat_id.strip()
     if configured and value:
-        return value
+        linked = UserRepository(database).get_user_by_telegram_id(value)
+        if linked is None or linked.uuid == user_uuid:
+            return value
     return str(random.randint(1_000_000, 10_000_000))
 
 
@@ -48,9 +53,12 @@ def _maybe_verify(
         service = user_service(database, cc, token)
         link = await service.generate_verification_link()
         code = link.replace(f"{runtime.get().pu_telegram_bot_link}?start=", "")
-        await service.verification(
-            telegram_chat_id(configured=configured), code
+        chat_id = telegram_chat_id(
+            database,
+            service.access_service.current_agent.uuid,
+            configured=configured,
         )
+        await service.verification(chat_id, code)
 
     asyncio.run(_verify())
 

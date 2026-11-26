@@ -15,7 +15,10 @@ import signal
 import subprocess
 import sys
 import time
+from logging.config import dictConfig
 from pathlib import Path
+
+from app.configs.logging_config import LOGGING_CONFIG
 
 
 class DataPipeSupervisor:
@@ -75,7 +78,7 @@ class DataPipeSupervisor:
         return True
 
     def _spawn(self) -> bool:
-        binary = self._binary_path()
+        binary = self.binary_path()
         if binary is None:
             logging.error("Data pipe binary is missing: %s", self.BINARY_PATH)
             return False
@@ -116,7 +119,7 @@ class DataPipeSupervisor:
         return self._stop
 
     @classmethod
-    def _binary_path(cls) -> Path | None:
+    def binary_path(cls) -> Path | None:
         override = os.environ.get("PU_DATA_PIPE_BIN", "").strip()
         candidates = [Path(override)] if override else []
         candidates.append(cls.BINARY_PATH)
@@ -234,6 +237,12 @@ class DataPipeProcess:
     def start(self) -> None:
         if self.proc is not None and self.proc.poll() is None:
             return
+        if DataPipeSupervisor.binary_path() is None:
+            logging.warning(
+                "Data pipe binary is missing: %s",
+                DataPipeSupervisor.BINARY_PATH,
+            )
+            return
         DataPipeSupervisor._stop_other_pipes()
         self.proc = subprocess.Popen(
             [sys.executable, "-m", "app.configs.datapipe_process"],
@@ -256,10 +265,7 @@ class DataPipeProcess:
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
+    dictConfig(LOGGING_CONFIG)
     DataPipeSupervisor().serve()
 
 

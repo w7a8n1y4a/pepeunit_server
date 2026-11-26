@@ -1,7 +1,11 @@
+from collections.abc import Iterator
+
 import pytest
 
 from app.domain.notification_model import Notification
+from app.domain.user_model import User
 from app.dto.enum import OperationTaskType
+from app.repositories.user_repository import UserRepository
 from app.schemas.pydantic.notification import NotificationSettingsUpdate
 from app.schemas.pydantic.operation_task import OperationTaskCreate
 from app.services.notification_service import NotificationService
@@ -11,11 +15,24 @@ from tests.integration.helpers.notifications import (
     latest_notification,
     process_saved,
 )
+from tests.integration.helpers.owner import as_owner
 from tests.integration.helpers.services import (
     notification_service,
     operation_task_service,
 )
 from tests.integration.helpers.tasks import drop_task
+
+
+@pytest.fixture
+def resource_alert_owner(database, extra_user) -> Iterator[User]:
+    owner = UserRepository(database).get_owner()
+    if owner is not None:
+        yield owner
+        return
+
+    with as_owner(database, extra_user):
+        database.refresh(extra_user)
+        yield extra_user
 
 
 @pytest.fixture

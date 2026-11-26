@@ -1,18 +1,16 @@
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 
 import httpx
+from pydantic import TypeAdapter, ValidationError
 
 from app import runtime
 from app.configs.error_codes import ErrorCode
 from app.configs.errors import PeerError
 from app.schemas.pydantic.instance import CurrentInstanceSchemaV1
-from app.schemas.pydantic.peer import (
-    PeerPublicRepo,
-    PeerReposPage,
-    PeerUrlsPage,
-)
+from app.schemas.pydantic.peer import PeerPublicRepo
 
 
 @dataclass
@@ -28,13 +26,8 @@ class PeerExternalRepository:
         started_at = time.perf_counter()
         state, urls, repos = await asyncio.gather(
             self._get_current(current_url),
-            self._get_all_items(current_url, "urls", PeerUrlsPage, "urls"),
-            self._get_all_items(
-                current_url,
-                "repos",
-                PeerReposPage,
-                "repos",
-            ),
+            self._get_all_items(current_url, "urls", str),
+            self._get_all_items(current_url, "repos", PeerPublicRepo),
         )
         return CollectedPeer(
             state=state,
@@ -47,29 +40,44 @@ class PeerExternalRepository:
         response = await self._request(current_url)
         return CurrentInstanceSchemaV1.model_validate_json(response.content)
 
-    async def _get_all_items(
+    async def _get_all_items[T](
         self,
         current_url: str,
         endpoint: str,
-        page_model: type[PeerUrlsPage] | type[PeerReposPage],
-        items_field: str,
-    ) -> list:
+        item_type: type[T],
+    ) -> list[T]:
         url = self.list_url(current_url, endpoint)
+        page_type = TypeAdapter(dict[str, object])
+        values_type = TypeAdapter(list[object])
+        count_type = TypeAdapter(int)
+        item_adapter = TypeAdapter(item_type)
 
         items = []
+        offset = 0
         while True:
             response = await self._request(
                 url,
                 httpx.QueryParams(
-                    offset=len(items),
+                    offset=offset,
                     limit=runtime.get().pu_instance_max_pagination_size,
                 ),
             )
-            page = page_model.model_validate_json(response.content)
+            page = page_type.validate_json(response.content)
+            total_count = count_type.validate_python(page.get("total_count"))
+            page_items = values_type.validate_python(page.get(endpoint))
+            for index, item in enumerate(page_items, start=offset):
+                try:
+                    items.append(item_adapter.validate_python(item))
+                except ValidationError:
+                    logging.warning(
+                        "Skip invalid peer %s entry at offset %s from %s",
+                        endpoint,
+                        index,
+                        current_url,
+                    )
 
-            page_items = getattr(page, items_field)
-            items.extend(page_items)
-            if not page_items or len(items) >= page.total_count:
+            offset += len(page_items)
+            if not page_items or offset >= total_count:
                 return items
 
     @staticmethod

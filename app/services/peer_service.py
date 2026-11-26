@@ -15,7 +15,6 @@ from pydantic import ValidationError as PydanticValidationError
 from app import runtime, settings
 from app.configs.error_codes import ErrorCode
 from app.configs.errors import (
-    CustomException,
     FeatureFlagError,
     InstanceError,
     PeerError,
@@ -200,17 +199,30 @@ class PeerService:
             )
         )
 
+        peer_reads = []
+        for peer in peers:
+            try:
+                peer_reads.append(self.mapper_peer_to_peer_read(peer))
+            except ValueError as error:
+                logging.warning(
+                    "Skip peer %s in instance cache: %s", peer.uuid, error
+                )
+
+        public_repos = []
+        for repo, _child_unit_count in repos:
+            try:
+                public_repos.append(self.mapper_repo_to_public_repo(repo))
+            except ValueError as error:
+                logging.warning(
+                    "Skip repo %s in instance cache: %s", repo.uuid, error
+                )
+
         self.instance_cache_repository.update(
             InstanceCacheSnapshot(
                 current=self.get_current_instance(),
-                peers=tuple(
-                    self.mapper_peer_to_peer_read(peer) for peer in peers
-                ),
-                urls=tuple(sorted(peer.url for peer in peers)),
-                repos=tuple(
-                    self.mapper_repo_to_public_repo(repo)
-                    for repo, _child_unit_count in repos
-                ),
+                peers=tuple(peer_reads),
+                urls=tuple(sorted(peer.url for peer in peer_reads)),
+                repos=tuple(public_repos),
             )
         )
 
@@ -353,21 +365,30 @@ class PeerService:
     async def collect_all(self, max_delay: int) -> str:
         self.is_federation_enable()
 
-        count, peers = self.peer_repository.list(
+        _, peers = self.peer_repository.list(
             PeerFilter.unlimited(trust_status=[PeerTrustStatus.TRUST.value])
         )
-
+        peer_uuids = [peer.uuid for peer in peers]
         collected = await asyncio.gather(
-            *(self.collect_with_delay(peer.uuid, max_delay) for peer in peers)
+            *(self.collect_with_delay(uuid, max_delay) for uuid in peer_uuids),
+            return_exceptions=True,
         )
-        failed = [
-            peer
-            for peer in collected
-            if peer.last_collection_status
-            != PeerCollectionStatus.SUCCESS.value
-        ]
+        failed = 0
+        for uuid, result in zip(peer_uuids, collected, strict=True):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            if isinstance(result, Exception):
+                logging.error(
+                    "Failed to collect peer %s", uuid, exc_info=result
+                )
+                failed += 1
+            elif (
+                result.last_collection_status
+                != PeerCollectionStatus.SUCCESS.value
+            ):
+                failed += 1
 
-        return f"Scanned {len(collected)}, failed {len(failed)}"
+        return f"Scanned {len(collected)}, failed {failed}"
 
     @staticmethod
     async def collect_with_delay(uuid: uuid_pkg.UUID, max_delay: int) -> Peer:
@@ -443,8 +464,12 @@ class PeerService:
             PeerFilter.unlimited(trust_status=[PeerTrustStatus.TRUST.value])
         )
 
-        for peer in peers:
-            await self.delete_stale_trusted(peer, threshold)
+        for uuid in [peer.uuid for peer in peers]:
+            try:
+                await self.delete_stale_trusted(self.get_peer(uuid), threshold)
+            except Exception:
+                self.peer_repository.db.rollback()
+                logging.exception("Failed to check stale peer %s", uuid)
 
     async def delete_stale_trusted(
         self,
@@ -471,24 +496,25 @@ class PeerService:
         for url in sorted(set(urls)):
             try:
                 valid_url = self.is_valid_url(url)
-            except PeerError as e:
-                logging.warning(f"Skip discovered Peer {url}: {e}")
-                continue
-
-            if valid_url in known_urls:
-                continue
-
-            known_urls.add(valid_url)
-            self.peer_repository.create(
-                Peer(
-                    url=valid_url,
-                    trust_status=PeerTrustStatus.PENDING.value,
-                    create_datetime=datetime.now(UTC),
+                if valid_url in known_urls:
+                    continue
+                self.peer_repository.create(
+                    Peer(
+                        url=valid_url,
+                        trust_status=PeerTrustStatus.PENDING.value,
+                        create_datetime=datetime.now(UTC),
+                    )
                 )
-            )
+            except Exception as error:
+                self.peer_repository.db.rollback()
+                logging.warning(
+                    "Skip discovered peer %s: %s", url, type(error).__name__
+                )
+            else:
+                known_urls.add(valid_url)
 
     def insert_discovered_repos(self, repos: Sequence[PeerPublicRepo]) -> None:
-        count, known_repos = self.repo_repository.list(RepoFilter.unlimited())
+        _, known_repos = self.repo_repository.list(RepoFilter.unlimited())
         known_urls = {
             repo.repository_url for repo, _child_unit_count in known_repos
         }
@@ -496,8 +522,6 @@ class PeerService:
         for repo in repos:
             if repo.url in known_urls:
                 continue
-
-            known_urls.add(repo.url)
             try:
                 self.repo_service.create(
                     RepoCreate(
@@ -507,8 +531,15 @@ class PeerService:
                     ),
                     is_api=True,
                 )
-            except CustomException as e:
-                logging.warning(f"Skip discovered Repo {repo.url}: {e}")
+            except Exception as error:
+                self.repo_repository.db.rollback()
+                logging.warning(
+                    "Skip discovered repo %s: %s",
+                    repo.url,
+                    type(error).__name__,
+                )
+            else:
+                known_urls.add(repo.url)
 
     def get_peer(self, uuid: uuid_pkg.UUID) -> Peer:
         peer = self.peer_repository.get(Peer(uuid=uuid))

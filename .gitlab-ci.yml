@@ -15,7 +15,7 @@ variables:
         && docker inspect "$CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | grep -qx 'GODEBUG=tlsmlkem=0'; then
         docker buildx use "$BUILDER"
       else
-        docker buildx rm -f "$BUILDER" >/dev/null 2>&1 || true
+        docker buildx rm -f --keep-state "$BUILDER" >/dev/null 2>&1 || true
         docker buildx create --use --name "$BUILDER" --driver docker-container --driver-opt env.GODEBUG=tlsmlkem=0
       fi
 
@@ -252,7 +252,10 @@ build:image:master:
     - !reference [.ensure_multiarch_builder, script]
     - docker buildx inspect --bootstrap
   script:
-    - docker buildx build --platform linux/amd64,linux/arm64 --pull --no-cache-filter os-deps --provenance=false --sbom=false -t $DOCKER_IMAGE_NAME:$DOCKER_IMAGE_TAG --push .
+    - >-
+      docker buildx build --platform linux/amd64,linux/arm64 --pull
+      --build-arg "APT_REFRESH=${CI_JOB_ID:?CI_JOB_ID is required}"
+      --provenance=false --sbom=false -t "$DOCKER_IMAGE_NAME:$DOCKER_IMAGE_TAG" --push .
 
 deploy:image:master:
   stage: deploy
@@ -395,7 +398,10 @@ tag:
     - !reference [.ensure_multiarch_builder, script]
     - docker buildx inspect --bootstrap
   script:
-    - docker buildx build --platform linux/amd64,linux/arm64 --pull --no-cache-filter os-deps --provenance=false --sbom=false -t $HUB_IMAGE:$CI_COMMIT_TAG --push .
+    - >-
+      docker buildx build --platform linux/amd64,linux/arm64 --pull
+      --build-arg "APT_REFRESH=${CI_JOB_ID:?CI_JOB_ID is required}"
+      --provenance=false --sbom=false -t "$HUB_IMAGE:$CI_COMMIT_TAG" --push .
 
 release:
   stage: release

@@ -87,19 +87,16 @@ class GrafanaRepository:
         headers = copy.deepcopy(cls.headers)
         headers.setdefault("X-Grafana-Org-Id", "1")
 
-        while True:
-            try:
-                dashboard_admin_permissions = [
-                    {"role": "Admin", "permission": 4}
-                ]
-
-                with cls._http_client() as client:
-                    for dashboard_uid in admin_only_dashboard_uids:
-                        dashboard_permissions_url = (
-                            f"{cls.base_grafana_url}/api/dashboards/uid/"
-                            f"{dashboard_uid}/permissions"
-                        )
-
+        dashboard_admin_permissions = [{"role": "Admin", "permission": 4}]
+        for attempt in range(cls._CONNECT_RETRIES):
+            retry = []
+            with cls._http_client() as client:
+                for dashboard_uid in admin_only_dashboard_uids:
+                    dashboard_permissions_url = (
+                        f"{cls.base_grafana_url}/api/dashboards/uid/"
+                        f"{dashboard_uid}/permissions"
+                    )
+                    try:
                         response = cls._request(
                             client,
                             "GET",
@@ -107,7 +104,6 @@ class GrafanaRepository:
                             headers=headers,
                         )
                         response.raise_for_status()
-
                         response = cls._request(
                             client,
                             "POST",
@@ -116,10 +112,16 @@ class GrafanaRepository:
                             json={"items": dashboard_admin_permissions},
                         )
                         response.raise_for_status()
-
-                break
-            except Exception as exc:
-                logging.error(exc)
+                    except httpx.HTTPError, GrafanaError:
+                        logging.exception(
+                            "Failed to configure Grafana dashboard %s",
+                            dashboard_uid,
+                        )
+                        retry.append(dashboard_uid)
+            if not retry:
+                return
+            admin_only_dashboard_uids = retry
+            if attempt + 1 < cls._CONNECT_RETRIES:
                 time.sleep(10)
 
     @staticmethod

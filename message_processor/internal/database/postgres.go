@@ -2,14 +2,17 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"message_processor/internal/config"
+	"message_processor/internal/logging"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -208,6 +211,36 @@ func (db *PostgresDB) InsertNotifications(ctx context.Context, rows []Notificati
 		return nil
 	}
 
+	err := db.insertNotificationRows(ctx, rows)
+	if notificationRowError(err) == nil {
+		return err
+	}
+
+	var failures []error
+	for _, row := range rows {
+		if ctx.Err() != nil {
+			return errors.Join(append(failures, ctx.Err())...)
+		}
+		if err := db.insertNotificationRows(ctx, []Notification{row}); err != nil {
+			if pgError := notificationRowError(err); pgError != nil {
+				logging.Warningf("Skipping notification %s for user %s: PostgreSQL %s", row.UUID, row.UserUUID, pgError.Code)
+			} else {
+				failures = append(failures, err)
+			}
+		}
+	}
+	return errors.Join(failures...)
+}
+
+func notificationRowError(err error) *pgconn.PgError {
+	var pgError *pgconn.PgError
+	if errors.As(err, &pgError) && (strings.HasPrefix(pgError.Code, "22") || strings.HasPrefix(pgError.Code, "23")) {
+		return pgError
+	}
+	return nil
+}
+
+func (db *PostgresDB) insertNotificationRows(ctx context.Context, rows []Notification) error {
 	query := `
 		INSERT INTO notifications (
 			uuid, create_datetime, type, data, is_read, user_uuid, is_processed
@@ -224,7 +257,7 @@ func (db *PostgresDB) InsertNotifications(ctx context.Context, rows []Notificati
 		values = append(values, row.UUID, row.CreateDatetime, row.Type, row.Data, row.UserUUID)
 	}
 
-	query += strings.Join(valueStrings, ",")
+	query += strings.Join(valueStrings, ",") + " ON CONFLICT (uuid) DO NOTHING"
 	if err := db.Exec(ctx, query, values...); err != nil {
 		return fmt.Errorf("failed to insert notifications: %w", err)
 	}

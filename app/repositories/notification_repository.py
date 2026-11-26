@@ -1,8 +1,10 @@
+import logging
 import uuid as uuid_pkg
 from datetime import datetime
 
 from fastapi import Depends
 from sqlalchemy import update
+from sqlalchemy.exc import DataError, IntegrityError
 from sqlmodel import Session, col, select
 
 from app.configs.db import get_session
@@ -68,9 +70,30 @@ class NotificationRepository(BaseRepository[Notification]):
     ) -> list[Notification]:
         if not notifications:
             return []
-        self.db.add_all(notifications)
-        self.db.commit()
-        return notifications
+        try:
+            self.db.add_all(notifications)
+            self.db.commit()
+        except DataError, IntegrityError:
+            self.db.rollback()
+        else:
+            return notifications
+
+        created = []
+        for notification in notifications:
+            notification_uuid = notification.uuid
+            try:
+                self.db.add(notification)
+                self.db.commit()
+            except (DataError, IntegrityError) as error:
+                self.db.rollback()
+                logging.warning(
+                    "Skip notification %s: %s",
+                    notification_uuid,
+                    type(error).__name__,
+                )
+            else:
+                created.append(notification)
+        return created
 
     def lock_unprocessed(
         self, limit: int

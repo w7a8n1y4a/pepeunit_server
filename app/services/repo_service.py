@@ -1,12 +1,11 @@
 import contextlib
-import datetime
 import json
 import logging
 import shutil
 import uuid as uuid_pkg
+from datetime import UTC, datetime
 
 from fastapi import Depends
-from sqlalchemy.orm.exc import ObjectDeletedError, StaleDataError
 
 from app import runtime
 from app.configs.error_codes import ErrorCode
@@ -187,7 +186,7 @@ class RepoService:
                 ),
             )
 
-        repo.create_datetime = datetime.datetime.now(datetime.UTC)
+        repo.create_datetime = datetime.now(UTC)
         repo.last_update_datetime = repo.create_datetime
         repo.icon_uuid = self.icon_repository.stage(
             IconImage.generate(repo.repository_url)
@@ -374,7 +373,7 @@ class RepoService:
 
         repo.sync_status = RepoStatus.PROCESSING
         repo.sync_error = None
-        repo.sync_last_datetime = datetime.datetime.now(datetime.UTC)
+        repo.sync_last_datetime = datetime.now(UTC)
 
         repo = self.repo_repository.update(repo.uuid, repo)
 
@@ -493,34 +492,34 @@ class RepoService:
     ) -> str:
         logging.info("Run sync of all repos")
 
-        local_physic_repository = self.git_repo_repository.get_local_repo()
-        local_repo = self.repo_repository.get_all()
+        local_repositories = set(self.git_repo_repository.get_local_repo())
+        repo_uuids = [repo.uuid for repo in self.repo_repository.get_all()]
 
-        synced = 0
-        for repo in local_repo:
-            repo_uuid = None
-            try:
-                repo_uuid = repo.uuid
-                if not force and str(repo_uuid) in local_physic_repository:
-                    continue
-                logging.info(f"Run sync repo: {repo.repository_url}")
-                self.sync_external_repository(repo)
-            except ObjectDeletedError, StaleDataError:
-                # Clone runs between two updates. A fixture or a parallel
-                # sync can delete the row before the second one lands.
-                self.repo_repository.db.rollback()
-                if (
-                    repo_uuid is not None
-                    and self.repo_repository.get(Repo(uuid=repo_uuid))
-                    is not None
-                ):
-                    raise
-                logging.warning("Skip sync, repo row is gone")
+        synced = failed = skipped = 0
+        for repo_uuid in repo_uuids:
+            if not force and str(repo_uuid) in local_repositories:
+                skipped += 1
                 continue
-            synced += 1
+            try:
+                repo = self.repo_repository.get(Repo(uuid=repo_uuid))
+                if repo is None:
+                    skipped += 1
+                    continue
+                result = self.sync_external_repository(repo)
+            except Exception:
+                self.repo_repository.db.rollback()
+                logging.exception("Failed to sync repo %s", repo_uuid)
+                failed += 1
+                continue
 
-        logging.info("End sync of all repos")
-        return f"Synced {synced} of {len(local_repo)} repos"
+            if result.sync_status == RepoStatus.ERROR:
+                failed += 1
+            else:
+                synced += 1
+
+        summary = f"Synced {synced} of {len(repo_uuids)} repos, failed {failed}, skipped {skipped}"
+        logging.info(summary)
+        return summary
 
     @staticmethod
     def is_valid_repo_url(
@@ -595,9 +594,7 @@ class RepoService:
                 repo.last_update_datetime
             )
 
-            delta = (
-                datetime.datetime.now(datetime.UTC) - last_update_datetime
-            ).total_seconds()
+            delta = (datetime.now(UTC) - last_update_datetime).total_seconds()
             if delta <= runtime.get().pu_instance_repo_min_interval_sync:
                 msg = f"Sync is not available, last sync was {delta} s ago, but it should have taken at least {runtime.get().pu_instance_repo_min_interval_sync} s"
                 raise RepoError(msg, code=ErrorCode.REPO_SYNC_TOO_SOON)

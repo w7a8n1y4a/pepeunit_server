@@ -1,6 +1,9 @@
 import uuid as uuid_pkg
+from typing import TypedDict
 
 from pydantic import Base64Bytes, BaseModel
+
+from app.schemas.pydantic.unit_manifest import FieldDeclarations
 
 
 class UnitVersionSelection(BaseModel):
@@ -17,3 +20,18 @@ class SnapshotManifestSource(BaseModel):
     repo_uuid: uuid_pkg.UUID
     commit: str
     content: Base64Bytes
+
+
+class SnapshotCommitResult(TypedDict, total=False):
+    commit: str
+    error: str
+
+
+class SnapshotManifestFields(TypedDict):
+    input: FieldDeclarations
+    output: FieldDeclarations
+
+
+class SnapshotManifestResult(TypedDict, total=False):
+    manifest: SnapshotManifestFields
+    error: str

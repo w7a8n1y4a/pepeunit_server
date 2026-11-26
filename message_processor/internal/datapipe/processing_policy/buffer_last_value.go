@@ -2,9 +2,12 @@ package processing_policy
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"message_processor/internal/database"
 	"message_processor/internal/logging"
@@ -68,6 +71,9 @@ func (b *LastValueBuffer) Stop() {
 
 // Add adds a message to the buffer
 func (b *LastValueBuffer) Add(ctx context.Context, uuid uuid.UUID, state string, updateTime time.Time) error {
+	if !utf8.ValidString(state) || strings.IndexByte(state, 0) >= 0 {
+		return errors.New("PostgreSQL state must be UTF-8 text without NUL")
+	}
 	b.mu.Lock()
 
 	b.updates[uuid] = struct {

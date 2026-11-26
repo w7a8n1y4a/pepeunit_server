@@ -9,6 +9,7 @@ from contextlib import suppress
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
+from redis.exceptions import RedisError
 from starlette.requests import Request
 
 from app import runtime
@@ -224,31 +225,41 @@ class NotificationDelivery:
         pending: list[tuple[Notification, User, NotificationSettings]],
     ) -> None:
         for notification, user, settings_row in pending:
-            if (
-                not settings_row.is_telegram_alert_enable
-                or not user.telegram_chat_id
-            ):
-                continue
-            self.telegram.enqueue(
-                user.telegram_chat_id,
-                notification.small_text,
-            )
+            try:
+                if (
+                    settings_row.is_telegram_alert_enable
+                    and user.telegram_chat_id
+                ):
+                    self.telegram.enqueue(
+                        user.telegram_chat_id, notification.small_text
+                    )
+            except TypeError, ValueError:
+                logging.exception(
+                    "Failed to enqueue Telegram notification %s",
+                    notification.uuid,
+                )
         if not pending:
             return
 
         session = get_redis_session()
         try:
             redis = await anext(session)
+            maxlen = runtime.get().pu_notification_stream_maxlen
             for notification, user, _settings_row in pending:
-                body = NotificationRead.model_validate(
-                    notification, from_attributes=True
-                ).model_dump_json()
-                await redis.xadd(
-                    self.stream_name(user.uuid),
-                    {self.EVENT: body},
-                    maxlen=runtime.get().pu_notification_stream_maxlen,
-                    approximate=True,
-                )
+                try:
+                    body = NotificationRead.model_validate(
+                        notification, from_attributes=True
+                    ).model_dump_json()
+                    await redis.xadd(
+                        self.stream_name(user.uuid),
+                        {self.EVENT: body},
+                        maxlen=maxlen,
+                        approximate=True,
+                    )
+                except RedisError, TypeError, ValueError:
+                    logging.exception(
+                        "Failed to publish notification %s", notification.uuid
+                    )
         finally:
             await session.aclose()
 

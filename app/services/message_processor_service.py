@@ -11,10 +11,12 @@ from app.domain.unit_model import Unit
 from app.repositories.git_repo_repository import GitRepoRepository
 from app.repositories.unit_manifest_repository import UnitManifestRepository
 from app.schemas.pydantic.message_processor import (
+    SnapshotCommitResult,
+    SnapshotManifestFields,
+    SnapshotManifestResult,
     SnapshotManifestSource,
     UnitVersionSelection,
 )
-from app.schemas.pydantic.unit_manifest import FieldDeclarations
 from app.services.unit_manifest_service import UnitManifestService
 
 
@@ -24,7 +26,7 @@ class MessageProcessorService:
 
     def select_commits(
         self, units: list[UnitVersionSelection]
-    ) -> dict[str, str]:
+    ) -> dict[str, SnapshotCommitResult]:
         commits = {}
         selected = {}
         for unit in units:
@@ -53,28 +55,32 @@ class MessageProcessorService:
                         )
                     )
                 except (GitRepoError, GitCommandError) as error:
-                    message = f"Unit {unit.unit_uuid}, repo {unit.repo_uuid}: {error}"
-                    raise ValueError(message) from error
-                commits[version] = selected_commit
+                    commits[version] = SnapshotCommitResult(error=str(error))
+                else:
+                    commits[version] = SnapshotCommitResult(
+                        commit=selected_commit
+                    )
             selected[str(unit.unit_uuid)] = commits[version]
         return selected
 
     def resolve_manifests(
         self, sources: list[SnapshotManifestSource]
-    ) -> list[dict[str, FieldDeclarations]]:
+    ) -> list[SnapshotManifestResult]:
         service = UnitManifestService(UnitManifestRepository())
         manifests = []
         for source in sources:
             try:
                 manifest, _ = service.parse_repo_manifest(source.content)
             except GitRepoError as error:
-                message = (
-                    f"Repo {source.repo_uuid} at {source.commit}: {error}"
+                manifests.append(SnapshotManifestResult(error=str(error)))
+            else:
+                manifests.append(
+                    SnapshotManifestResult(
+                        manifest=SnapshotManifestFields(
+                            input=manifest.input, output=manifest.output
+                        )
+                    )
                 )
-                raise ValueError(message) from error
-            manifests.append(
-                {"input": manifest.input, "output": manifest.output}
-            )
         return manifests
 
     def run(self) -> None:

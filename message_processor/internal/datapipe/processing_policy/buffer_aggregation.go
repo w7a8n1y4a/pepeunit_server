@@ -31,7 +31,6 @@ type AggregationBuffer struct {
 	maxSize       int
 	clickhouseDB  *database.ClickHouseDB
 	stopCh        chan struct{}
-	policy        *types.ProcessingPolicyConfig
 }
 
 // AggregationWindow represents a time window for aggregation
@@ -44,6 +43,8 @@ type AggregationWindow struct {
 	Min           float64
 	Max           float64
 	LastFlushTime time.Time
+	Function      types.AggregationFunctions
+	WindowSize    uint32
 }
 
 // NewAggregationBuffer creates a new aggregation buffer
@@ -113,11 +114,9 @@ func (b *AggregationBuffer) Add(ctx context.Context, uuid uuid.UUID, state strin
 	if policy.TimeWindowSize == nil {
 		return apperr.New(apperr.TimeWindowSizeMissing, "time window size not specified in policy")
 	}
-
-	// Store policy in buffer
-	b.mu.Lock()
-	b.policy = &policy
-	b.mu.Unlock()
+	if *policy.TimeWindowSize < 1 || uint64(*policy.TimeWindowSize) > math.MaxUint32 {
+		return apperr.New(apperr.InvalidPolicyConfiguration, "invalid aggregation window size")
+	}
 
 	// Convert state string to float64
 	stateFloat, err := strconv.ParseFloat(state, 64)
@@ -129,7 +128,6 @@ func (b *AggregationBuffer) Add(ctx context.Context, uuid uuid.UUID, state strin
 	windowKey := getWindowKey(updateTime, *policy.TimeWindowSize)
 
 	b.mu.Lock()
-	defer b.mu.Unlock()
 
 	// Initialize node's windows map if it doesn't exist
 	if _, exists := b.updates[uuid]; !exists {
@@ -149,6 +147,8 @@ func (b *AggregationBuffer) Add(ctx context.Context, uuid uuid.UUID, state strin
 			Min:           math.MaxFloat64,
 			Max:           -math.MaxFloat64,
 			LastFlushTime: time.Time{},
+			Function:      *policy.AggregationFunctions,
+			WindowSize:    uint32(*policy.TimeWindowSize),
 		}
 		b.updates[uuid][windowKey] = window
 	}
@@ -165,7 +165,9 @@ func (b *AggregationBuffer) Add(ctx context.Context, uuid uuid.UUID, state strin
 	}
 
 	// Check if we need to flush
-	if window.EndTime.Before(time.Now()) {
+	shouldFlush := window.EndTime.Before(time.Now())
+	b.mu.Unlock()
+	if shouldFlush {
 		return b.Flush(ctx)
 	}
 
@@ -233,27 +235,18 @@ func (b *AggregationBuffer) Flush(ctx context.Context) error {
 	}
 	logging.Infof("Sending %d Aggregation entries to ClickHouse", totalEntries)
 
-	// Get policy from buffer
-	b.mu.Lock()
-	policy := b.policy
-	b.mu.Unlock()
-
-	if policy == nil || policy.TimeWindowSize == nil || policy.AggregationFunctions == nil {
-		return apperr.New(apperr.InvalidPolicyConfiguration, "invalid policy configuration")
-	}
-
 	// Convert updates to AggregationEntry slice
 	entries := make([]database.AggregationEntry, 0, totalEntries)
 	for ioUUID, windows := range updatesCopy {
 		for _, window := range windows {
 			// Calculate aggregated value
-			aggregatedValue := calculateAggregation(window, string(*policy.AggregationFunctions))
+			aggregatedValue := calculateAggregation(window, string(window.Function))
 
 			entries = append(entries, database.AggregationEntry{
 				UnitIOUUID:          ioUUID,
 				State:               aggregatedValue,
-				AggregationType:     string(*policy.AggregationFunctions),
-				TimeWindowSize:      uint32(*policy.TimeWindowSize),
+				AggregationType:     string(window.Function),
+				TimeWindowSize:      window.WindowSize,
 				CreateDateTime:      time.Now(),
 				StartWindowDateTime: window.StartTime,
 				EndWindowDateTime:   window.EndTime,

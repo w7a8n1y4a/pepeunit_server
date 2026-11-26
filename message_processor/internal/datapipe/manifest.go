@@ -14,6 +14,8 @@ import (
 
 const maxManifestBytes = 1024 * 1024
 
+var errManifestTooLarge = fmt.Errorf("unit.yml exceeds %d bytes", maxManifestBytes)
+
 var gitCommitPattern = regexp.MustCompile("^[0-9a-f]{40}([0-9a-f]{24})?$")
 
 type ioField = map[string]any
@@ -50,7 +52,7 @@ func readGitManifest(ctx context.Context, repoCache string, version manifestVers
 		if readErr != nil {
 			return nil, readErr
 		}
-		return nil, fmt.Errorf("unit.yml exceeds %d bytes", maxManifestBytes)
+		return nil, errManifestTooLarge
 	}
 	if err := cmd.Wait(); err != nil {
 		return nil, fmt.Errorf("read unit.yml from local Git: %w: %s", err, bytes.TrimSpace(stderr.Bytes()))

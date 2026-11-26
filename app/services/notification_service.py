@@ -206,12 +206,13 @@ class NotificationService:
         users = self.notification_settings_repository.list_scheduled(
             moment.strftime("%H:%M")
         )
-        return self.notification_repository.bulk_create(
-            [
-                *self._instance_daily_state(users, moment),
-                *self._unit_daily_summary(users, moment),
-            ]
-        )
+        try:
+            notifications = self._instance_daily_state(users, moment)
+        except Exception:
+            logging.exception("Failed to generate daily instance summary")
+            notifications = []
+        notifications.extend(self._unit_daily_summary(users, moment))
+        return self.notification_repository.bulk_create(notifications)
 
     def _instance_daily_state(
         self, users: list[User], moment: datetime
@@ -250,19 +251,27 @@ class NotificationService:
     ) -> list[Notification]:
         notifications = []
         for user in users:
-            ranked = self._unit_error_counts(user, moment)
-            if not ranked:
-                continue
-            notifications.append(
-                Notification(
-                    create_datetime=moment,
-                    type=NotificationType.UNIT_DAILY_SUMMARY.value,
-                    data=UnitDailySummaryData(units=ranked).model_dump(),
-                    is_read=False,
-                    is_processed=False,
-                    user_uuid=user.uuid,
+            user_uuid = user.uuid
+            try:
+                ranked = self._unit_error_counts(user, moment)
+                if ranked:
+                    notifications.append(
+                        Notification(
+                            create_datetime=moment,
+                            type=NotificationType.UNIT_DAILY_SUMMARY.value,
+                            data=UnitDailySummaryData(
+                                units=ranked
+                            ).model_dump(),
+                            is_read=False,
+                            is_processed=False,
+                            user_uuid=user_uuid,
+                        )
+                    )
+            except Exception:
+                self.unit_repository.db.rollback()
+                logging.exception(
+                    "Failed to generate unit summary for user %s", user_uuid
                 )
-            )
         return notifications
 
     def _unit_error_counts(

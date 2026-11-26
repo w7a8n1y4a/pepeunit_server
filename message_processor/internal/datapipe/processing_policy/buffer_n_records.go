@@ -19,6 +19,7 @@ type NRecordsEntry struct {
 	State          string
 	UpdateTime     time.Time
 	TypeInputValue types.TypeInputValue
+	MaxCount       uint32
 }
 
 // NRecordsBuffer accumulates messages and periodically flushes them to the database
@@ -29,7 +30,6 @@ type NRecordsBuffer struct {
 	maxSize       int
 	clickhouseDB  *database.ClickHouseDB
 	stopCh        chan struct{}
-	policy        *types.ProcessingPolicyConfig
 }
 
 // NewNRecordsBuffer creates a new NRecords buffer
@@ -82,11 +82,6 @@ func (b *NRecordsBuffer) Add(ctx context.Context, uuid uuid.UUID, state string, 
 		return apperr.New(apperr.NRecordsCountMissing, "NRecords count not specified in policy")
 	}
 
-	// Store policy in buffer
-	b.mu.Lock()
-	b.policy = &policy
-	b.mu.Unlock()
-
 	// Get filters config from context
 	filters, ok := ctx.Value("filters").(types.FiltersConfig)
 	if !ok {
@@ -98,6 +93,7 @@ func (b *NRecordsBuffer) Add(ctx context.Context, uuid uuid.UUID, state string, 
 		State:          state,
 		UpdateTime:     updateTime,
 		TypeInputValue: filters.TypeInputValue,
+		MaxCount:       uint32(*policy.NRecordsCount),
 	}
 
 	// Check if we need to flush before adding new entry
@@ -149,15 +145,6 @@ func (b *NRecordsBuffer) Flush(ctx context.Context) error {
 	}
 	logging.Infof("Sending %d NRecords entries to ClickHouse", totalEntries)
 
-	// Get policy from buffer
-	b.mu.Lock()
-	policy := b.policy
-	b.mu.Unlock()
-
-	if policy == nil || policy.NRecordsCount == nil {
-		return apperr.New(apperr.NRecordsCountMissing, "NRecords count not specified in policy")
-	}
-
 	// Convert updates to NLastEntry slice
 	entries := make([]database.NLastEntry, 0, totalEntries)
 	for ioUUID, nodeEntries := range updatesCopy {
@@ -167,7 +154,7 @@ func (b *NRecordsBuffer) Flush(ctx context.Context) error {
 				State:          entry.State,
 				StateType:      string(entry.TypeInputValue), // Use TypeInputValue from config
 				CreateDateTime: entry.UpdateTime,
-				MaxCount:       uint32(*policy.NRecordsCount), // Use NRecordsCount from policy
+				MaxCount:       entry.MaxCount,
 				Size:           uint32(len(entry.State)),
 			})
 		}

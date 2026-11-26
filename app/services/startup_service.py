@@ -276,8 +276,11 @@ class StartupService:
     async def _run_instance_cache_loop(self) -> None:
         while True:
             await asyncio.sleep(60)
-            with BackgroundService() as services:
-                services.get_peer_service().refresh_cache()
+            try:
+                with BackgroundService() as services:
+                    services.get_peer_service().refresh_cache()
+            except Exception:
+                logging.exception("Instance cache refresh failed")
 
     async def _run_instance_collection_loop(self) -> None:
         while True:
@@ -296,6 +299,8 @@ class StartupService:
                     service = services.get_peer_service()
                     await service.delete_stale_peers()
                     service.refresh_cache()
+            except Exception:
+                logging.exception("Scheduled peer collection failed")
             finally:
                 lock.close()
 
@@ -312,6 +317,8 @@ class StartupService:
                     # Git sync is synchronous and must not stall the
                     # notification loop on this event loop
                     await asyncio.to_thread(work)
+                except Exception:
+                    logging.exception("Hourly job %s failed", lock)
                 finally:
                     lock_fd.close()
             else:

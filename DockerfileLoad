@@ -23,3 +23,5 @@ RUN uv sync --frozen --extra load --extra dev
 ENV PATH="/app/.venv/bin:$PATH"
 
 COPY . .
+
+RUN mkdir -p /app/tmp

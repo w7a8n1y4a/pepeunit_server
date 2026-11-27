@@ -31,6 +31,7 @@ from app.dto.clickhouse.time_window import TimeWindow
 from app.dto.enum import (
     AgentType,
     BackendTopicCommand,
+    BackendTopicCommandKey,
     FieldKey,
     JsonPayload,
     MqttQos,
@@ -40,7 +41,6 @@ from app.dto.enum import (
     PayloadCodec,
     PermissionEntities,
     ProcessingPolicyType,
-    ReservedEnvVariableName,
     ReservedInputBaseTopic,
     ReservedOutputBaseTopic,
     UnitFirmwareUpdateStatus,
@@ -432,9 +432,12 @@ class UnitIOService:
         )
         is_valid_object(unit_io, NotFoundEntity.UNIT_IO)
 
-        message = self._build_message_dict(
+        message = self.build_command_payload(
             command, repo, unit, selected_commit, selected_tag
         )
+        if command == BackendTopicCommand.LOG_SYNC:
+            self.unit_log_repository.delete(unit.uuid)
+
         try:
             mqtt_manager.publish(
                 get_topic_name(unit_io.uuid),
@@ -457,30 +460,25 @@ class UnitIOService:
             unit.firmware_update_status = UnitFirmwareUpdateStatus.REQUEST_SENT
             self.unit_repository.update(unit.uuid, unit)
 
-    def _build_message_dict(
+    def build_command_payload(
         self,
         command: BackendTopicCommand,
         repo: Repo,
         unit: Unit,
         selected_commit: str,
         selected_tag: str | None,
-    ) -> dict:
-        message_dict = {"COMMAND": command}
+    ) -> dict[BackendTopicCommandKey, str]:
+        payload = {BackendTopicCommandKey.COMMAND: command.value}
+        if command != BackendTopicCommand.UPDATE:
+            return payload
 
-        if command == BackendTopicCommand.UPDATE:
-            message_dict[ReservedEnvVariableName.PU_COMMIT_VERSION.value] = (
-                selected_commit
+        payload[BackendTopicCommandKey.COMMIT_VERSION] = selected_commit
+        if unit.is_compilable_unit:
+            _, link = self.git_repo_repository.get_firmware_asset(
+                repo, selected_tag, unit.target_firmware_platform
             )
-            if unit.is_compilable_unit:
-                _, link = self.git_repo_repository.get_firmware_asset(
-                    repo, selected_tag, unit.target_firmware_platform
-                )
-                message_dict["COMPILED_FIRMWARE_LINK"] = link
-
-        elif command == BackendTopicCommand.LOG_SYNC:
-            self.unit_log_repository.delete(unit.uuid)
-
-        return message_dict
+            payload[BackendTopicCommandKey.COMPILED_FIRMWARE_LINK] = link
+        return payload
 
     def get_link_nodes(self, data: LinkCreate) -> tuple[UnitIO, UnitIO]:
         self.access_service.authorization.check_access([AgentType.USER])

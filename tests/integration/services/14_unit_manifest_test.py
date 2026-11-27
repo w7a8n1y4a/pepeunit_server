@@ -476,7 +476,7 @@ def test_compiled_update_command_points_to_release_asset(
     assert received.topic == topic.topic
     assert received.qos == MqttQos.AT_LEAST_ONCE.value
     assert json.loads(received.payload) == {
-        "COMMAND": BackendTopicCommand.UPDATE.value,
-        "PU_COMMIT_VERSION": compiled_repo.tagged_commit,
-        "COMPILED_FIRMWARE_LINK": compiled_repo.asset_url,
+        "command": BackendTopicCommand.UPDATE.value,
+        "pu_commit_version": compiled_repo.tagged_commit,
+        "compiled_firmware_link": compiled_repo.asset_url,
     }

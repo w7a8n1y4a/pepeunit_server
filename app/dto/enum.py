@@ -146,6 +146,12 @@ class BackendTopicCommand(str, enum.Enum):
     RESET = "Reset"
 
 
+class BackendTopicCommandKey(str, enum.Enum):
+    COMMAND = "command"
+    COMMIT_VERSION = "pu_commit_version"
+    COMPILED_FIRMWARE_LINK = "compiled_firmware_link"
+
+
 class ReservedInputBaseTopic(str, enum.Enum):
     """
     Booked input topics at Unit

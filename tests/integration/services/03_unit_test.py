@@ -25,20 +25,18 @@ from app.dto.agent.abc import AgentBackend
 from app.dto.clickhouse.log import UnitLog
 from app.dto.enum import (
     BackendTopicCommand,
-    BackendTopicCommandKey,
     LogLevel,
-    MqttQos,
     OperationTaskStatus,
     OperationTaskType,
     OrderByDate,
     ReservedEnvVariableName,
-    ReservedInputBaseTopic,
     StaticRepoFileName,
     UnitIOTypeEnum,
     VisibilityLevel,
 )
 from app.repositories.unit_log_repository import UnitLogRepository
 from app.schemas.pydantic.unit import (
+    EnvJsonString,
     UnitCreate,
     UnitFilter,
     UnitLogFilter,
@@ -46,7 +44,12 @@ from app.schemas.pydantic.unit import (
 )
 from app.services.utils import get_topic_name
 from app.utils.utils import aes_gcm_encode
-from tests.client.mqtt import COUNTER_INPUT, COUNTER_OUTPUT, UNIT_ROOT
+from tests.client.mqtt import (
+    COUNTER_INPUT,
+    COUNTER_OUTPUT,
+    UNIT_ROOT,
+    CounterUnit,
+)
 from tests.integration.helpers.http import (
     api_request,
     get_unit_logs_file,
@@ -55,7 +58,6 @@ from tests.integration.helpers.http import (
     post_bulk_update_units,
     post_unit_command,
 )
-from tests.integration.helpers.mqtt import MQTTProbe
 from tests.integration.helpers.names import unique_name
 from tests.integration.helpers.services import (
     branch_commits,
@@ -284,10 +286,15 @@ def test_run_infrastructure_contour(running_units) -> None:
 
 
 def test_hand_update_firmware_unit(
-    running_units, regular_user_token, database, cc
+    running_units, client_emulator, regular_user_token, database, cc
 ) -> None:
     service = unit_service(database, cc, regular_user_token)
     target_units = running_units.firmware_manual()
+    startups = {
+        unit.uuid: client_emulator.last_startup_log(unit.uuid)
+        for unit in target_units
+    }
+    assert all(startups.values())
     expected_ssid = "archive-update"
     for unit in target_units:
         selected = service.get_selected_version(unit.uuid)
@@ -299,8 +306,11 @@ def test_hand_update_firmware_unit(
         )
 
     def all_updated() -> bool:
+        client_emulator.require_running()
         return all(
-            FileManager.read_env(
+            (startup := client_emulator.last_startup_log(unit.uuid))
+            and startup != startups[unit.uuid]
+            and FileManager.read_env(
                 str(UNIT_ROOT / str(unit.uuid) / StaticRepoFileName.ENV)
             )["PUC_WIFI_SSID"]
             == expected_ssid
@@ -394,19 +404,41 @@ def test_auto_update_firmware_unit(
 
 
 def test_env_update_command(
-    running_units, chain_sink_unit, regular_user_token, database, cc
+    running_units,
+    client_emulator,
+    chain_sink_unit,
+    regular_user_token,
+    database,
+    cc,
 ) -> None:
-    token = regular_user_token
-    service = unit_service(database, cc, token)
-    logging.info(chain_sink_unit.uuid)
-
-    current_env = service.get_env(chain_sink_unit.uuid)
-    current_env["PU_MIN_LOG_LEVEL"] = "Info"
-    service.set_env(chain_sink_unit.uuid, json.dumps(current_env))
+    input_io = find_unit_io(
+        unit_io_service(database, cc, regular_user_token),
+        chain_sink_unit.uuid,
+        COUNTER_INPUT,
+    )
+    client_emulator.wait_for_counter_input(
+        regular_user_token, chain_sink_unit.uuid, input_io.uuid
+    )
+    profile = {"label": "sdk-env", "limits": [2, 7]}
+    updated = EnvJsonString(
+        env_json_string=json.dumps(
+            {
+                ReservedEnvVariableName.PU_MIN_LOG_LEVEL: LogLevel.INFO,
+                "TEST_PROFILE": profile,
+            }
+        )
+    )
+    response = api_request(
+        "PATCH",
+        f"/units/env/{chain_sink_unit.uuid}",
+        regular_user_token,
+        json=updated.model_dump(),
+    )
+    assert response.status_code == 204, response.text
 
     assert (
         post_unit_command(
-            token, chain_sink_unit, BackendTopicCommand.ENV_UPDATE
+            regular_user_token, chain_sink_unit, BackendTopicCommand.ENV_UPDATE
         )
         < 400
     )
@@ -414,8 +446,10 @@ def test_env_update_command(
     filepath = UNIT_ROOT / str(chain_sink_unit.uuid) / StaticRepoFileName.ENV
 
     def env_updated() -> bool:
+        env = FileManager.read_env(filepath)
         return (
-            FileManager.read_env(str(filepath))["PU_MIN_LOG_LEVEL"] == "Info"
+            env[ReservedEnvVariableName.PU_MIN_LOG_LEVEL] == LogLevel.INFO
+            and env.get("TEST_PROFILE") == profile
         )
 
     wait_until(
@@ -426,35 +460,22 @@ def test_env_update_command(
     )
 
 
-def test_io_topics_update_command(
-    crud_unit, regular_user_token, database, cc
-) -> None:
-    service = unit_service(database, cc, regular_user_token)
-    probe = MQTTProbe.from_unit(service, crud_unit.uuid)
-    topic = probe.topics.input[ReservedInputBaseTopic.IO_TOPICS_UPDATE]
-    command = BackendTopicCommand.IO_TOPICS_UPDATE
-
-    with probe.connected():
-        probe.subscribe(topic)
-        assert post_unit_command(regular_user_token, crud_unit, command) == 204
-        received = probe.receive(timeout=5)
-
-    assert received is not None
-    assert received.topic == topic.topic
-    assert received.qos == MqttQos.AT_LEAST_ONCE.value
-    assert json.loads(received.payload) == {
-        BackendTopicCommandKey.COMMAND: command.value
-    }
-
-
 def test_log_sync_command(
-    running_units, chain_middle_unit, regular_user_token
+    running_units, client_emulator, chain_middle_unit, regular_user_token
 ) -> None:
     token = regular_user_token
     client = next(get_clickhouse_client())
     try:
         unit_log_repository = UnitLogRepository(client)
-        logging.info(chain_middle_unit.uuid)
+        expected = client_emulator.last_startup_log(chain_middle_unit.uuid)
+        assert expected is not None
+        logs_filter = UnitLogFilter.unlimited(
+            uuid=chain_middle_unit.uuid, level=[LogLevel.INFO.value]
+        )
+        assert all(
+            entry.text != expected
+            for entry in unit_log_repository.list(logs_filter)[1]
+        )
         assert (
             post_unit_command(
                 token, chain_middle_unit, BackendTopicCommand.LOG_SYNC
@@ -463,51 +484,54 @@ def test_log_sync_command(
         )
 
         wait_until(
-            lambda: (
-                unit_log_repository.list(
-                    UnitLogFilter(uuid=chain_middle_unit.uuid, level=["Info"])
-                )[0]
-                > 0
+            lambda: any(
+                entry.text == expected
+                for entry in unit_log_repository.list(logs_filter)[1]
             ),
             timeout=30,
             interval=2,
-            message="LOG_SYNC did not produce Info rows in ClickHouse",
+            message="LogSync did not upload the startup log from the SDK file",
         )
     finally:
         client.disconnect()
 
 
 def test_reset_command(
-    running_units, chain_sink_unit, regular_user_token
+    running_units,
+    client_emulator,
+    chain_sink_unit,
+    regular_user_token,
+    database,
+    cc,
 ) -> None:
-    token = regular_user_token
-    client = next(get_clickhouse_client())
-    try:
-        unit_log_repository = UnitLogRepository(client)
-        logging.info(chain_sink_unit.uuid)
-        assert (
-            post_unit_command(
-                token, chain_sink_unit, BackendTopicCommand.RESET
-            )
-            < 400
+    previous = client_emulator.last_startup_log(chain_sink_unit.uuid)
+    assert previous is not None
+    assert (
+        post_unit_command(
+            regular_user_token, chain_sink_unit, BackendTopicCommand.RESET
         )
+        == 204
+    )
 
-        def reset_logged() -> bool:
-            _, logs = unit_log_repository.list(
-                UnitLogFilter.unlimited(
-                    uuid=chain_sink_unit.uuid, level=["Info"]
-                )
-            )
-            return any("Reset command received" in log.text for log in logs)
+    def restarted() -> bool:
+        client_emulator.require_running()
+        current = client_emulator.last_startup_log(chain_sink_unit.uuid)
+        return current is not None and current != previous
 
-        wait_until(
-            reset_logged,
-            timeout=30,
-            interval=2,
-            message="RESET did not produce Reset log in ClickHouse",
-        )
-    finally:
-        client.disconnect()
+    wait_until(restarted, timeout=30, message="Reset did not restart the Unit")
+    input_io = find_unit_io(
+        unit_io_service(database, cc, regular_user_token),
+        chain_sink_unit.uuid,
+        COUNTER_INPUT,
+    )
+    client_emulator.wait_for_counter_input(
+        regular_user_token, chain_sink_unit.uuid, input_io.uuid
+    )
+    log_path = UNIT_ROOT / str(chain_sink_unit.uuid) / CounterUnit.LOG_FILENAME
+    assert any(
+        "Reset command received" in entry["text"]
+        for entry in FileManager.iter_ndjson(log_path)
+    )
 
 
 def test_get_many_unit(

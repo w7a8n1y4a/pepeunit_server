@@ -26,6 +26,7 @@ from app.dto.enum import (
 from app.schemas.pydantic.repo import RepoFilter
 from app.schemas.pydantic.unit import UnitCreate, UnitFilter, UnitUpdate
 from tests.client.mqtt import COUNTER_INPUT, COUNTER_OUTPUT
+from tests.integration.fixtures.units import PREVIOUS_MANIFEST_COMMIT
 from tests.integration.helpers.http import (
     api_request,
     generate_manifest_readme,
@@ -44,7 +45,6 @@ from tests.integration.helpers.services import (
 )
 
 MANIFESTS = Path("tests/data/unit_manifest")
-PREVIOUS_MANIFEST_COMMIT = "33f1f77f31a60d108611608deb8b51f448f66aa4"
 
 
 @pytest.mark.parametrize(

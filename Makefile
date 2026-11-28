@@ -35,7 +35,7 @@ test-module:
 
 test-integration:
 	@echo "Integration test run..."
-	uv run pytest tests/integration -c tests/pytest.ini -v
+	uv run --locked --reinstall-package pepeunit-client pytest tests/integration -c tests/pytest.ini -v
 
 test-load-rest:
 	@echo "REST load test run..."

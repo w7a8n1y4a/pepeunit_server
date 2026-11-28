@@ -1,92 +1,84 @@
-import asyncio
 import json
-import threading
+import signal
+import sys
 import time
+import uuid as uuid_pkg
 from pathlib import Path
+from types import FrameType
 
+from paho.mqtt.client import MQTT_ERR_SUCCESS, MQTTMessage
 from pepeunit_client import PepeunitClient
-from pepeunit_client.enums import BaseOutputTopicType, RestartMode
-
-from app.dto.enum import StaticRepoFileName
 
 COUNTER_INPUT = "input_counter"
 COUNTER_OUTPUT = "output_counter"
 UNIT_ROOT = Path("tmp/test_units")
 
 
-class EmulatorPepeunitClient(PepeunitClient):
-    def _restart_program(self) -> None:
-        self._reload_after_update()
+class CounterUnit:
+    CYCLE_SECONDS = 0.25
+    MESSAGES_PER_VALUE = 10
+    LOG_FILENAME = "log.ndjson"
+    INPUT_LOG_FILENAME = "log_state.json"
+    STARTUP_LOG_PREFIX = "Counter unit started: "
 
-
-class MQTTClient:
-    def __init__(self, unit):
-        self.directory = UNIT_ROOT / str(unit.uuid)
-        self.running = threading.Event()
-        self.running.set()
-        self.client = EmulatorPepeunitClient(
-            env_file_path=str(self.directory / StaticRepoFileName.ENV),
-            log_file_path=str(self.directory / "log.json"),
+    def __init__(self, env_file: Path) -> None:
+        self.directory = env_file.parent
+        self.stopping = False
+        self.count = 0
+        self.client = PepeunitClient(
+            env_file_path=str(env_file),
+            log_file_path=str(self.directory / self.LOG_FILENAME),
             enable_mqtt=True,
-            restart_mode=RestartMode.ENV_TOPICS_ONLY,
+            cycle_speed=self.CYCLE_SECONDS,
             ff_version_check_enable=False,
             ff_console_log_enable=False,
         )
-        self.client.set_mqtt_input_handler(self.mqtt_input_handler)
-        self.connected_since = None
+        self.client.set_mqtt_input_handler(self.handle_input)
+        self.client.set_output_handler(self.publish_counter)
 
-    def mqtt_input_handler(self, client: PepeunitClient, msg) -> None:
-        if client.io_topics.input_name(msg.topic) != COUNTER_INPUT:
+    def handle_input(
+        self, client: PepeunitClient, message: MQTTMessage
+    ) -> None:
+        if client.io_topics.input_name(message.topic) != COUNTER_INPUT:
             return
-        if json.loads(msg.payload) != 0:
+        if json.loads(message.payload) != 0:
             return
         record = {
             "value": 0,
-            "input_topic": msg.topic,
+            "input_topic": message.topic,
             "timestamp": time.time(),
         }
-        destination = self.directory / "log_state.json"
+        destination = self.directory / self.INPUT_LOG_FILENAME
         pending = destination.with_suffix(".tmp")
         pending.write_text(json.dumps(record), encoding="utf-8")
         pending.replace(destination)
         client.publish_to_topics(COUNTER_OUTPUT, "0")
 
-    def report_state(self) -> None:
-        now = time.time()
-        if self.connected_since is None:
-            self.connected_since = now
-            self.client._last_state_send = 0
-        interval = self.client.settings.PU_STATE_SEND_INTERVAL
-        gap = (
-            min(interval, 2)
-            if now - self.connected_since < interval
-            else interval
-        )
-        if now - self.client._last_state_send < gap:
+    def publish_counter(self, client: PepeunitClient) -> None:
+        if self.stopping:
+            client.stop_main_cycle()
             return
-        payload = json.dumps(self.client.get_system_state())
-        info = self.client.publish_to_topics(
-            BaseOutputTopicType.STATE.value, payload
-        )
-        if info is not None and info.rc == 0:
-            self.client._last_state_send = now
+        value = self.count // self.MESSAGES_PER_VALUE
+        publish = client.publish_to_topics(COUNTER_OUTPUT, str(value))
+        if publish is not None and publish.rc == MQTT_ERR_SUCCESS:
+            self.count += 1
 
-    async def run(self) -> None:
-        count = 0
+    def request_stop(self, signum: int, frame: FrameType | None) -> None:
+        self.stopping = True
+
+    def run(self) -> None:
+        signal.signal(signal.SIGTERM, self.request_stop)
+        mqtt = self.client.mqtt_client
+        assert mqtt is not None
         try:
             self.client.connect()
-            while self.running.is_set():
-                if self.client.mqtt_client._client.is_connected():
-                    self.client.publish_to_topics(
-                        COUNTER_OUTPUT, str(count // 10)
-                    )
-                    self.report_state()
-                    count += 1
-                else:
-                    self.connected_since = None
-                await asyncio.sleep(0.25)
+            self.client.logger.info(
+                f"{self.STARTUP_LOG_PREFIX}{uuid_pkg.uuid4()}", file_only=True
+            )
+            self.client.run_main_cycle()
         finally:
-            self.client.mqtt_client.disconnect()
+            mqtt.disconnect()
 
-    def stop(self) -> None:
-        self.running.clear()
+
+if __name__ == "__main__":
+    CounterUnit(Path(sys.argv[1])).run()

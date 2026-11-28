@@ -3,7 +3,6 @@ import logging
 import time
 import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
-from unittest.mock import patch
 
 import httpx
 import pytest
@@ -231,28 +230,33 @@ def test_notification_stream(
 
 
 def test_delete_expired_data_pipe_alerts(database: Session) -> None:
-    now = datetime(2026, 11, 26, tzinfo=UTC)
-    cutoff = now - timedelta(days=90)
-    older = cutoff - timedelta(microseconds=1)
-    newer = cutoff + timedelta(microseconds=1)
+    now = datetime.now(UTC)
+    older = now - timedelta(days=91)
+    newer = now - timedelta(days=89)
     user_uuid = uuid_pkg.uuid4()
-    alerts = [
+    retained = [
         Notification(
             user_uuid=user_uuid,
             create_datetime=created_at,
             type=kind.value,
-            is_processed=processed,
-            is_read=processed,
+            is_processed=True,
+            is_read=True,
         )
-        for created_at, kind, processed in (
-            (older, NotificationType.DATA_PIPE_ALERT, True),
-            (older, NotificationType.DATA_PIPE_ALERT, False),
-            (cutoff, NotificationType.DATA_PIPE_ALERT, True),
-            (newer, NotificationType.DATA_PIPE_ALERT, True),
-            (older, NotificationType.INSTANCE_DAILY_STATE, True),
+        for created_at, kind in (
+            (
+                newer - timedelta(microseconds=1),
+                NotificationType.DATA_PIPE_ALERT,
+            ),
+            (newer, NotificationType.DATA_PIPE_ALERT),
+            (
+                newer + timedelta(microseconds=1),
+                NotificationType.DATA_PIPE_ALERT,
+            ),
+            (older, NotificationType.INSTANCE_DAILY_STATE),
         )
     ]
-    retained = {alert.uuid for alert in alerts[2:]}
+    retained_uuids = {alert.uuid for alert in retained}
+    before_cutoff_uuid = retained[0].uuid
 
     with database.get_bind().connect() as connection:
         connection.begin()
@@ -264,20 +268,35 @@ def test_delete_expired_data_pipe_alerts(database: Session) -> None:
         with Session(
             connection, join_transaction_mode="create_savepoint"
         ) as session:
-            session.add_all(alerts)
+            service = notification_service(session, None)
+            expired_count = service.DATA_PIPE_ALERT_CLEANUP_BATCH_SIZE + 1
+            expired = [
+                Notification(
+                    user_uuid=user_uuid,
+                    create_datetime=older,
+                    type=NotificationType.DATA_PIPE_ALERT.value,
+                    is_processed=bool(index % 2),
+                    is_read=bool(index % 2),
+                )
+                for index in range(expired_count)
+            ]
+            session.add_all(retained + expired)
             session.flush()
             connection.exec_driver_sql("SET LOCAL TIME ZONE 'Europe/Moscow'")
-            service = notification_service(session, None)
-            service.DATA_PIPE_ALERT_CLEANUP_BATCH_SIZE = 1
-            with patch(
-                "app.services.notification_service.datetime", wraps=datetime
-            ) as clock:
-                clock.now.return_value = now
-                assert service.delete_expired_data_pipe_alerts() == 2
-                assert service.delete_expired_data_pipe_alerts() == 0
+            assert service.delete_expired_data_pipe_alerts() == expired_count
+            assert service.delete_expired_data_pipe_alerts() == 0
 
             remaining = session.exec(select(col(Notification.uuid))).all()
-            assert set(remaining) == retained
+            assert set(remaining) == retained_uuids
+
+            assert (
+                service.notification_repository.delete_older_than(
+                    NotificationType.DATA_PIPE_ALERT, newer, expired_count
+                )
+                == 1
+            )
+            remaining = session.exec(select(col(Notification.uuid))).all()
+            assert set(remaining) == retained_uuids - {before_cutoff_uuid}
 
 
 @pytest.mark.datapipe

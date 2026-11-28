@@ -1,12 +1,15 @@
 import json
-import logging
-import os
 import shutil
-import zlib
+from collections.abc import Iterator
 from dataclasses import dataclass, fields
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
+from clickhouse_driver import Client
+from pepeunit_client import PepeunitClient, RestartMode
 from pepeunit_client.file_manager import FileManager
+from sqlmodel import Session
 
 from app import runtime
 from app.domain.unit_model import Unit
@@ -14,6 +17,7 @@ from app.dto.enum import StaticRepoFileName, VisibilityLevel
 from app.schemas.pydantic.unit import UnitCreate
 from app.schemas.pydantic.unit_io import UnitIOTopicRead
 from tests.client.mqtt import COUNTER_INPUT, COUNTER_OUTPUT, UNIT_ROOT
+from tests.integration.helpers.http import api_request, get_unit_env_file
 from tests.integration.helpers.mqtt import MQTTProbe, link_between
 from tests.integration.helpers.names import entity_name, unique_name
 from tests.integration.helpers.services import (
@@ -24,6 +28,8 @@ from tests.integration.helpers.services import (
     unit_service,
 )
 from tests.integration.helpers.wait import wait_until
+
+PREVIOUS_MANIFEST_COMMIT = "33f1f77f31a60d108611608deb8b51f448f66aa4"
 
 
 def _create_manual_unit(
@@ -248,45 +254,31 @@ def auxiliary_unit(live_units):
 
 @pytest.fixture(scope="session")
 def unpacked_firmwares(
-    live_units, regular_user_token, database, cc
+    live_units: LiveUnits, regular_user_token: str
 ) -> LiveUnits:
-    service = unit_service(database, cc, regular_user_token)
-    methods = [
-        service.get_unit_firmware_zip,
-        service.get_unit_firmware_tar,
-        service.get_unit_firmware_tgz,
-    ]
-    leftovers = []
-
-    for inc, unit in enumerate(live_units.all()):
-        logging.info(unit.uuid)
-        method_idx = inc % 3
-        if method_idx == 2:
-            tgz_path = methods[method_idx](unit.uuid, 9, 9)
-            leftovers.append(tgz_path)
-            with open(tgz_path, "rb") as handle:
-                producer = zlib.decompressobj(wbits=9)
-                tar_data = (
-                    producer.decompress(handle.read()) + producer.flush()
+    formats = ("zip", "tar", "tgz")
+    with TemporaryDirectory() as directory:
+        for index, unit in enumerate(live_units.all()):
+            archive_format = formats[index % len(formats)]
+            response = api_request(
+                "GET",
+                f"/units/firmware/{archive_format}/{unit.uuid}",
+                regular_user_token,
+            )
+            response.raise_for_status()
+            archive = Path(directory) / f"{unit.uuid}.{archive_format}"
+            archive.write_bytes(response.content)
+            unpack_path = UNIT_ROOT / str(unit.uuid)
+            if archive_format == "tgz":
+                FileManager.extract_pepeunit_archive(
+                    str(archive), str(unpack_path)
                 )
-            archive_path = f"tmp/{unit.uuid}.tar"
-            with open(archive_path, "wb") as tar_file:
-                tar_file.write(tar_data)
-        else:
-            archive_path = methods[method_idx](unit.uuid)
+            else:
+                shutil.unpack_archive(archive, unpack_path)
 
-        leftovers.append(archive_path)
-        unpack_path = UNIT_ROOT / str(unit.uuid)
-        shutil.unpack_archive(
-            archive_path, unpack_path, "zip" if method_idx == 0 else "tar"
-        )
-
-        env = FileManager.read_env(str(unpack_path / StaticRepoFileName.ENV))
-        assert len(env["PU_AUTH_TOKEN"]) > 100
-
-    for path in leftovers:
-        os.remove(path)
-
+            assert (unpack_path / StaticRepoFileName.UNIT_MANIFEST).is_file()
+            env = FileManager.read_env(unpack_path / StaticRepoFileName.ENV)
+            assert len(env["PU_AUTH_TOKEN"]) > 100
     return live_units
 
 
@@ -364,6 +356,33 @@ def crud_unit(universal_repo, regular_user_token, database, cc):
         unit_service(database, cc, token).delete(unit.uuid)
     except Exception:
         pass
+
+
+@pytest.fixture
+def sdk_unit(
+    crud_unit: Unit,
+    regular_user_token: str,
+    database: Session,
+    cc: Client,
+    tmp_path: Path,
+) -> Iterator[PepeunitClient]:
+    service = unit_service(database, cc, regular_user_token)
+    token = service.generate_token(crud_unit.uuid)
+    env_file = tmp_path / StaticRepoFileName.ENV
+    env_file.write_bytes(get_unit_env_file(token, crud_unit.uuid).content)
+    client = PepeunitClient(
+        env_file_path=str(env_file),
+        log_file_path=str(tmp_path / "log.ndjson"),
+        enable_mqtt=True,
+        restart_mode=RestartMode.ENV_TOPICS_ONLY,
+        ff_console_log_enable=False,
+    )
+    mqtt = client.mqtt_client
+    assert mqtt is not None
+    try:
+        yield client
+    finally:
+        mqtt.disconnect()
 
 
 @pytest.fixture

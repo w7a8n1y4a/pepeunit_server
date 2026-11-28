@@ -20,7 +20,12 @@ from app.schemas.pydantic.unit_io import (
     UnitIOUpdate,
 )
 from app.utils.utils import create_upload_file_from_path
-from tests.client.mqtt import COUNTER_INPUT, COUNTER_OUTPUT, UNIT_ROOT
+from tests.client.mqtt import (
+    COUNTER_INPUT,
+    COUNTER_OUTPUT,
+    UNIT_ROOT,
+    CounterUnit,
+)
 from tests.integration.helpers.data_pipe import upload_pipe_csv
 from tests.integration.helpers.http import patch_input_state
 from tests.integration.helpers.services import (
@@ -184,7 +189,9 @@ def test_create_link(running_units, chain_links, regular_user_token) -> None:
     def chain_arrived() -> bool:
         ready = True
         for unit, (input_io, _) in zip(target_units, chain_links, strict=True):
-            filepath = UNIT_ROOT / str(unit.uuid) / "log_state.json"
+            filepath = (
+                UNIT_ROOT / str(unit.uuid) / CounterUnit.INPUT_LOG_FILENAME
+            )
             if not os.path.exists(filepath):
                 ready = False
                 continue

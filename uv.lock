@@ -1478,7 +1478,7 @@ requires-dist = [
     { name = "paho-mqtt", specifier = ">=2.1.0" },
     { name = "paho-mqtt", marker = "extra == 'load'", specifier = ">=2.1.0" },
     { name = "pathspec", specifier = ">=0.12.1" },
-    { name = "pepeunit-client", specifier = "==1.5.1", index = "https://test.pypi.org/simple/" },
+    { name = "pepeunit-client", specifier = "==1.5.2", index = "https://test.pypi.org/simple/" },
     { name = "pillow", specifier = ">=13.0.0" },
     { name = "pint", specifier = ">=0.25,<0.26" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.8.0" },
@@ -1512,16 +1512,18 @@ provides-extras = ["dev", "load"]
 
 [[package]]
 name = "pepeunit-client"
-version = "1.5.1"
+version = "1.5.2"
 source = { registry = "https://test.pypi.org/simple/" }
 dependencies = [
     { name = "cryptography" },
+    { name = "httpx" },
+    { name = "paho-mqtt" },
     { name = "psutil", marker = "platform_system != 'emscripten'" },
     { name = "pyyaml" },
 ]
-sdist = { url = "https://test-files.pythonhosted.org/packages/76/bc/39f9d7c2f14c53662404d2b22344d7120d9b814f94ac58db4d991b988b22/pepeunit_client-1.5.1.tar.gz", hash = "sha256:e027df5ba53f33f4c5624db020210e708a5964f66ef5683b6f1f3b0d6fa655fb", size = 29195, upload-time = "2026-11-26T02:52:31.1Z" }
+sdist = { url = "https://test-files.pythonhosted.org/packages/f4/00/871b8946d79a5f4951a876473f8010f423bd9cd62c9113f0033dc7f7c037/pepeunit_client-1.5.2.tar.gz", hash = "sha256:ce70593d06d656b83a0cbab4de28268d0e925196b065cb45e6964766eddae4c9", size = 26195, upload-time = "2026-11-28T00:19:16.929Z" }
 wheels = [
-    { url = "https://test-files.pythonhosted.org/packages/ca/83/7d7ae3287ba1deeb4afce5b65b75b416ca99b51537ddba8ac659c0452e62/pepeunit_client-1.5.1-py3-none-any.whl", hash = "sha256:d2cfb60e9e110f1b33ebe9ae6da490fc8f87cf576b89084939b120023f40cb7c", size = 31159, upload-time = "2026-11-26T02:52:29.198Z" },
+    { url = "https://test-files.pythonhosted.org/packages/d5/4b/167a3394b8c749fc2393946b6e5c7b3f7ef9f04693cb52c777f2481ac497/pepeunit_client-1.5.2-py3-none-any.whl", hash = "sha256:adf23e33d1848f540c6429a3ec3851239589fdf22fd109523a904806d6cc4dea", size = 29582, upload-time = "2026-11-28T00:19:15.332Z" },
 ]
 
 [[package]]

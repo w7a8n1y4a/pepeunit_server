@@ -1,6 +1,6 @@
 import base64
 import contextlib
-import datetime
+import datetime as dt
 import json
 import logging
 import uuid as uuid_pkg
@@ -140,7 +140,7 @@ class UnitIOService:
         self, uuid: uuid_pkg.UUID
     ) -> list[UnitIOResourceWindowRead]:
         unit_io = self.get(uuid)
-        now = datetime.datetime.now(datetime.UTC)
+        now = dt.datetime.now(dt.UTC)
         rows = self.data_pipe_repository.list_resource_windows(
             unit_io.uuid, now
         )
@@ -172,7 +172,7 @@ class UnitIOService:
     def new_unit_io(
         cls, unit: Unit, direction: UnitIOTypeEnum, name: str
     ) -> UnitIO:
-        now = datetime.datetime.now(datetime.UTC)
+        now = dt.datetime.now(dt.UTC)
         unit_io = UnitIO(
             type=direction,
             visibility_level=unit.visibility_level,
@@ -268,9 +268,7 @@ class UnitIOService:
             [update_unit_io],
         )
 
-        update_unit_io.last_update_datetime = datetime.datetime.now(
-            datetime.UTC
-        )
+        update_unit_io.last_update_datetime = dt.datetime.now(dt.UTC)
 
         unit_io_updated = self.unit_io_repository.update(uuid, update_unit_io)
 
@@ -368,7 +366,7 @@ class UnitIOService:
         mqtt_manager.publish(get_topic_name(unit_io.uuid), payload, qos)
 
         unit_io.state = data.state
-        unit_io.last_update_datetime = datetime.datetime.now(datetime.UTC)
+        unit_io.last_update_datetime = dt.datetime.now(dt.UTC)
         return self.unit_io_repository.update(uuid, unit_io)
 
     def list_commands(
@@ -390,7 +388,7 @@ class UnitIOService:
         *,
         selected_commit_and_tag: tuple[str, str | None] | None = None,
         manifest: UnitDefinition | None = None,
-    ) -> None:
+    ) -> bool:
         if not is_auto_update:
             self.access_service.authorization.check_access(
                 [AgentType.USER, AgentType.UNIT]
@@ -414,7 +412,7 @@ class UnitIOService:
             selected_commit_and_tag is not None
             and selected_commit_and_tag[0] != rechecked_commit_and_tag[0]
         ):
-            return
+            return False
         selected_commit, selected_tag = (
             selected_commit_and_tag or rechecked_commit_and_tag
         )
@@ -425,7 +423,7 @@ class UnitIOService:
             )
         field = manifest.input.get(input_name)
         if field is None:
-            return
+            return False
 
         unit_io = self.unit_io_repository.get_by_topic(
             unit.uuid, UnitIO(type=UnitIOTypeEnum.INPUT, topic_name=input_name)
@@ -454,11 +452,10 @@ class UnitIOService:
 
         if command == BackendTopicCommand.UPDATE:
             unit.firmware_update_error = None
-            unit.last_firmware_update_datetime = datetime.datetime.now(
-                datetime.UTC
-            )
+            unit.last_firmware_update_datetime = dt.datetime.now(dt.UTC)
             unit.firmware_update_status = UnitFirmwareUpdateStatus.REQUEST_SENT
             self.unit_repository.update(unit.uuid, unit)
+        return True
 
     def build_command_payload(
         self,
@@ -888,7 +885,7 @@ class UnitIOService:
         unit_io = self.unit_io_repository.get(UnitIO(uuid=unit_io_uuid))
         is_valid_object(unit_io, NotFoundEntity.UNIT_IO)
         unit_io.state = state
-        unit_io.last_update_datetime = datetime.datetime.now(datetime.UTC)
+        unit_io.last_update_datetime = dt.datetime.now(dt.UTC)
 
         return self.unit_io_repository.update(unit_io.uuid, unit_io)
 

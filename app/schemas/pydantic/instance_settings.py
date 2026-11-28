@@ -1,7 +1,7 @@
 import enum
 import re
 import uuid as uuid_pkg
-from typing import ClassVar, Literal
+from typing import ClassVar
 
 from pydantic import (
     BaseModel,
@@ -17,6 +17,7 @@ from app.configs.config import (
     SettingsValidationMixin,
 )
 from app.configs.error_codes import ErrorCode
+from app.dto.enum import TelegramBotMode
 
 
 class InstanceSettingsData(SettingsValidationMixin, BaseModel):
@@ -104,7 +105,7 @@ class InstanceSettingsData(SettingsValidationMixin, BaseModel):
     pu_notification_telegram_user_interval_seconds: float = Field(ge=1, le=60)
 
     pu_telegram_bot_link: str = Field(max_length=512)
-    pu_telegram_bot_mode: Literal["webhook", "pooling"]
+    pu_telegram_bot_mode: TelegramBotMode
     pu_telegram_git_hash_length: int = Field(ge=1, le=16)
     pu_telegram_header_entity_length: int = Field(ge=1, le=64)
     pu_telegram_items_per_page: int = Field(ge=1, le=20)
@@ -289,7 +290,7 @@ class InstanceSettingsUpdate(BaseModel):
     pu_notification_telegram_user_interval_seconds: float | None = None
 
     pu_telegram_bot_link: str | None = None
-    pu_telegram_bot_mode: Literal["webhook", "pooling"] | None = None
+    pu_telegram_bot_mode: TelegramBotMode | None = None
     pu_telegram_git_hash_length: int | None = None
     pu_telegram_header_entity_length: int | None = None
     pu_telegram_items_per_page: int | None = None

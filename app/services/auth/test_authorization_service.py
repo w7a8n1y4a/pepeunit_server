@@ -227,9 +227,15 @@ def test_get_available_visibility_levels_bot(
 ):
     mock_agent.type = AgentType.BOT
     result = authorization_service.get_available_visibility_levels(
-        ["PUBLIC", "INTERNAL"]
+        [VisibilityLevel.PUBLIC, VisibilityLevel.INTERNAL]
     )
     assert result == [VisibilityLevel.PUBLIC]
+    assert (
+        authorization_service.get_available_visibility_levels(
+            [VisibilityLevel.INTERNAL]
+        )
+        == []
+    )
 
 
 def test_get_available_visibility_levels_user_with_restriction(
@@ -237,9 +243,9 @@ def test_get_available_visibility_levels_user_with_restriction(
 ):
     mock_agent.type = AgentType.USER
     result = authorization_service.get_available_visibility_levels(
-        ["PUBLIC", "INTERNAL"], ["INTERNAL"]
+        [VisibilityLevel.PRIVATE], [uuid.uuid4()]
     )
-    assert result == ["PUBLIC", "INTERNAL"]
+    assert result == [VisibilityLevel.PRIVATE]
 
 
 def test_get_available_visibility_levels_user_without_restriction(
@@ -247,6 +253,6 @@ def test_get_available_visibility_levels_user_without_restriction(
 ):
     mock_agent.type = AgentType.USER
     result = authorization_service.get_available_visibility_levels(
-        ["PUBLIC", "INTERNAL"]
+        [VisibilityLevel.PRIVATE, VisibilityLevel.INTERNAL]
     )
-    assert result == [VisibilityLevel.PUBLIC, VisibilityLevel.INTERNAL]
+    assert result == [VisibilityLevel.INTERNAL]

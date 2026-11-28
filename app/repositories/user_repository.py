@@ -46,7 +46,7 @@ class UserRepository(BaseRepository):
             select(User).where(User.hash_public_key == hash_public_key)
         ).first()
 
-    def get_user_by_telegram_id(self, telegram_chat_id: str):
+    def get_user_by_telegram_id(self, telegram_chat_id: str) -> User | None:
         return self.db.exec(
             select(User).where(User.telegram_chat_id == telegram_chat_id)
         ).first()

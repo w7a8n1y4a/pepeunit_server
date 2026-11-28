@@ -1,162 +1,54 @@
-from aiogram import F, types
-from aiogram.fsm.context import FSMContext
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app import runtime
 from app.configs.clickhouse import get_hand_clickhouse_client
 from app.configs.db import get_hand_session
 from app.configs.rest import get_bot_unit_service
+from app.dto.clickhouse.log import UnitLog
 from app.dto.enum import EntityNames, LogLevel
 from app.schemas.bot.base_bot_router import (
     BaseBotFilters,
     BaseBotRouter,
-    UnitIOStates,
+    BotPage,
 )
-from app.schemas.bot.utils import make_monospace_table_with_title
 from app.schemas.pydantic.unit import UnitLogFilter
 
 
-class UnitLogBotRouter(BaseBotRouter):
-    def __init__(self):
-        entity_name = EntityNames.UNIT_LOG.value
-        super().__init__(entity_name=entity_name, states_group=UnitIOStates)
-        self.router.callback_query(
-            F.data.startswith(f"{self.entity_name}_unit_")
-        )(self.handle_by_unit)
+class UnitLogBotRouter(BaseBotRouter[UnitLog]):
+    MAX_PREVIEW_LENGTH = 120
 
-    async def handle_by_unit(
-        self, callback: types.CallbackQuery, state: FSMContext
-    ):
-        *_, unit_uuid = callback.data.split("_")
+    def __init__(self) -> None:
+        super().__init__(EntityNames.UNIT_LOG, from_unit=True)
 
-        await state.set_state(None)
-        filters = BaseBotFilters(unit_uuid=unit_uuid)
-        await state.update_data(current_filters=filters)
-        await self.show_entities(callback, filters)
-
-    async def show_entities(
-        self,
-        message: types.Message | types.CallbackQuery,
-        filters: BaseBotFilters,
-    ):
-        chat_id = (
-            message.chat.id
-            if isinstance(message, types.Message)
-            else message.from_user.id
-        )
-
-        entities, total_pages = await self.get_entities_page(
-            filters, str(chat_id)
-        )
-        keyboard = self.build_entities_keyboard(entities, filters, total_pages)
-
-        text = "*Unit Logs*"
-        if filters.unit_uuid:
-            with get_hand_session() as db, get_hand_clickhouse_client() as cc:
-                unit_service = get_bot_unit_service(db, cc, str(chat_id))
-                unit = unit_service.get(filters.unit_uuid)
-
-            text += f" - for unit `{unit.name}`"
-
-        table = [["Time", "Level", "Text"]]
-
-        if entities:
-            table.extend(
-                [
-                    [
-                        unit_log.create_datetime.strftime("%Y-%m-%d%H:%M:%S"),
-                        unit_log.level.value,
-                        unit_log.text,
-                    ]
-                    for unit_log in entities[::-1]
-                ]
-            )
-        else:
-            table.append(["-", "-", "-"])
-
-        text += "\n```text\n"
-
-        text += make_monospace_table_with_title(table, lengths=[10, 5, 25])
-
-        text += "```"
-
-        await self.telegram_response(message, text, keyboard)
-
-    async def get_entities_page(
+    def load_page(
         self, filters: BaseBotFilters, chat_id: str
-    ) -> tuple[list, int]:
+    ) -> BotPage[UnitLog]:
         with get_hand_session() as db, get_hand_clickhouse_client() as cc:
-            unit_service = get_bot_unit_service(db, cc, str(chat_id))
-
-            count, unit_logs = unit_service.log_list(
+            unit_service = get_bot_unit_service(db, cc, chat_id)
+            unit = unit_service.get(filters.unit_uuid)
+            count, logs = unit_service.log_list(
                 UnitLogFilter(
-                    offset=(filters.page - 1)
-                    * runtime.get().pu_telegram_items_per_page,
-                    limit=runtime.get().pu_telegram_items_per_page,
-                    level=filters.log_levels or [],
-                    uuid=filters.unit_uuid,
+                    offset=filters.offset,
+                    limit=filters.page_size,
+                    level=filters.log_levels,
+                    uuid=unit.uuid,
                 )
             )
 
-            total_pages = (
-                count + runtime.get().pu_telegram_items_per_page - 1
-            ) // runtime.get().pu_telegram_items_per_page
-
-        return unit_logs, total_pages
-
-    def build_entities_keyboard(
-        self, _entities: list, filters: BaseBotFilters, total_pages: int
-    ) -> InlineKeyboardMarkup:
-        builder = InlineKeyboardBuilder()
-
-        filter_level_buttons = [
-            InlineKeyboardButton(
-                text=("🟢 " if item.value in filters.log_levels else "🔴️ ")
-                + item.value,
-                callback_data=f"{self.entity_name}_toggle_" + item.value,
-            )
-            for item in LogLevel
-        ]
-        builder.row(*filter_level_buttons)
-
-        if total_pages > 1:
-            pagination_row = []
-            if filters.page > 1:
-                pagination_row.append(
-                    InlineKeyboardButton(
-                        text="⬅️", callback_data=f"{self.entity_name}_prev_page"
-                    )
-                )
-
-            pagination_row.append(
-                InlineKeyboardButton(
-                    text=f"{filters.page}/{total_pages}", callback_data="noop"
-                )
-            )
-
-            if filters.page < total_pages:
-                pagination_row.append(
-                    InlineKeyboardButton(
-                        text="➡️", callback_data=f"{self.entity_name}_next_page"
-                    )
-                )
-            builder.row(*pagination_row)
-
-        builder.row(
-            InlineKeyboardButton(
-                text="← Back",
-                callback_data=f"{EntityNames.UNIT.value}_uuid_{filters.unit_uuid}_{filters.page}",
-            )
+        body = "\n".join(
+            f"{log.create_datetime:%Y-%m-%d %H:%M:%S} {log.level.value} "
+            f"{self.shorten(' '.join(log.text.splitlines()), self.MAX_PREVIEW_LENGTH)}"
+            for log in reversed(logs)
         )
-        return builder.as_markup()
+        return BotPage(
+            count,
+            logs,
+            f"Unit logs · {self.header_name_limit(unit.name)}",
+            body,
+        )
 
-    async def handle_entity_click(
-        self, callback: types.CallbackQuery, _state: FSMContext
-    ) -> None:
-        await callback.answer(parse_mode="Markdown")
-
-    async def handle_entity_decrees(
-        self, callback: types.CallbackQuery
-    ) -> None:
-        await callback.answer(parse_mode="Markdown")
+    def build_list_keyboard(
+        self, _items: list[UnitLog], filters: BaseBotFilters
+    ) -> InlineKeyboardBuilder:
+        builder = InlineKeyboardBuilder()
+        self.add_choices(builder, LogLevel, filters.log_levels)
+        return builder

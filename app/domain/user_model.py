@@ -64,3 +64,10 @@ class User(SQLModel, table=True):
     grafana_org_id: str = Field(nullable=True)
 
     create_datetime: datetime = Field(nullable=False)
+
+    @property
+    def telegram_private_chat_id(self) -> int | None:
+        chat_id = self.telegram_chat_id
+        if not chat_id or not chat_id.isascii() or not chat_id.isdecimal():
+            return None
+        return int(chat_id) or None

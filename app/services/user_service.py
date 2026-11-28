@@ -1,4 +1,4 @@
-import datetime
+import datetime as dt
 import json
 import secrets
 import uuid as uuid_pkg
@@ -7,12 +7,20 @@ from fastapi import Depends
 
 from app import runtime
 from app.configs.error_codes import ErrorCode
-from app.configs.errors import FeatureFlagError, UserError
+from app.configs.errors import FeatureFlagError, NoAccessError, UserError
 from app.configs.redis import get_redis_session
 from app.domain.notification_settings_model import NotificationSettings
 from app.domain.user_model import User
 from app.dto.agent.abc import AgentGrafana, AgentUser
-from app.dto.enum import AgentType, NotFoundEntity, UserRole, UserStatus
+from app.dto.enum import (
+    AgentType,
+    CommandNames,
+    NotFoundEntity,
+    TelegramStateKey,
+    UserRole,
+    UserStatus,
+    UuidEntity,
+)
 from app.repositories.data_pipe_repository import DataPipeRepository
 from app.repositories.grafana_repository import GrafanaRepository
 from app.repositories.icon_repository import IconRepository
@@ -30,14 +38,16 @@ from app.schemas.pydantic.user import (
 from app.services.access_service import AccessService
 from app.services.auth.challenge import ChallengeService
 from app.services.icon_image import IconImage
-from app.services.validators import is_valid_object
-from app.utils.utils import generate_random_string
+from app.services.validators import is_valid_object, is_valid_uuid
 
 
 class UserService:
     grafana_ticket_prefix = "grafana_ticket:"
     grafana_ticket_ttl = 60
-    grafana_session_lifetime = datetime.timedelta(seconds=120)
+    grafana_session_lifetime = dt.timedelta(seconds=120)
+    VERIFICATION_CODE_BYTES = 24
+    LEGACY_VERIFICATION_CODE_LENGTH = 8
+    VERIFICATION_CODE_TTL = 60
 
     def __init__(
         self,
@@ -70,7 +80,7 @@ class UserService:
             hash_public_key=hash_public_key,
             role=UserRole.USER,
             status=UserStatus.ACTIVE,
-            create_datetime=datetime.datetime.now(datetime.UTC),
+            create_datetime=dt.datetime.now(dt.UTC),
         )
         user.icon_uuid = self.icon_repository.stage(
             IconImage.generate(public_key)
@@ -108,16 +118,12 @@ class UserService:
         )
         return AgentUser(**user.dict()).generate_agent_token()
 
-    def get_grafana_token(
-        self, lifetime: datetime.timedelta | None = None
-    ) -> str:
+    def get_grafana_token(self, lifetime: dt.timedelta | None = None) -> str:
         self.access_service.authorization.check_access([AgentType.USER])
 
         current_user = self.access_service.current_agent
         expires = (
-            None
-            if lifetime is None
-            else datetime.datetime.now(datetime.UTC) + lifetime
+            None if lifetime is None else dt.datetime.now(dt.UTC) + lifetime
         )
         return AgentGrafana(
             uuid=current_user.uuid,
@@ -166,25 +172,38 @@ class UserService:
             raise FeatureFlagError(msg, code=ErrorCode.FEATURE_DISABLED)
 
         self.access_service.authorization.check_access([AgentType.USER])
-        redis = await anext(get_redis_session())
-
-        code = generate_random_string(8)
-        await redis.set(
-            code, str(self.access_service.current_agent.uuid), ex=60
-        )
-
-        return f"{runtime.get().pu_telegram_bot_link}?start={code}"
+        code = secrets.token_urlsafe(self.VERIFICATION_CODE_BYTES)
+        async with await anext(get_redis_session()) as redis:
+            await redis.set(
+                f"{TelegramStateKey.VERIFICATION_CODE}:{code}",
+                str(self.access_service.current_agent.uuid),
+                ex=self.VERIFICATION_CODE_TTL,
+            )
+        return f"{runtime.get().pu_telegram_bot_link}?{CommandNames.START.value}={code}"
 
     async def verification(
         self, telegram_chat_id: str, verification_code: str
-    ):
-        redis = await anext(get_redis_session())
-        uuid = await redis.get(verification_code)
-        is_valid_object(uuid, NotFoundEntity.VERIFICATION_CODE)
-        await redis.delete(verification_code)
+    ) -> User:
+        async with await anext(get_redis_session()) as redis:
+            stored_uuid = await redis.getdel(
+                f"{TelegramStateKey.VERIFICATION_CODE}:{verification_code}"
+            )
+            if (
+                stored_uuid is None
+                and len(verification_code)
+                == self.LEGACY_VERIFICATION_CODE_LENGTH
+                and verification_code.isascii()
+                and verification_code.isalnum()
+            ):
+                stored_uuid = await redis.getdel(verification_code)
+        is_valid_object(stored_uuid, NotFoundEntity.VERIFICATION_CODE)
 
-        user = self.user_repository.get(User(uuid=uuid))
+        user_uuid = is_valid_uuid(stored_uuid, UuidEntity.USER)
+        user = self.user_repository.get(User(uuid=user_uuid), for_update=True)
         is_valid_object(user, NotFoundEntity.USER)
+        if user.status == UserStatus.BLOCKED:
+            msg = "User is blocked"
+            raise NoAccessError(msg, code=ErrorCode.ACCESS_USER_BLOCKED)
         self.user_repository.is_valid_telegram_chat_id(
             telegram_chat_id, user.uuid
         )
@@ -210,16 +229,16 @@ class UserService:
         user.role = UserRole.USER
         return self.user_repository.update(user.uuid, user)
 
-    def block(self, uuid: uuid_pkg.UUID) -> None:
+    def block(self, uuid: uuid_pkg.UUID) -> User:
         self.access_service.authorization.check_access(
             [AgentType.USER], [UserRole.ADMIN]
         )
         user = self.user_repository.get(User(uuid=uuid))
         is_valid_object(user, NotFoundEntity.USER)
         user.status = UserStatus.BLOCKED
-        self.user_repository.update(user.uuid, user)
+        return self.user_repository.update(user.uuid, user)
 
-    def unblock(self, uuid: uuid_pkg.UUID) -> None:
+    def unblock(self, uuid: uuid_pkg.UUID) -> User:
         self.access_service.authorization.check_access(
             [AgentType.USER], [UserRole.ADMIN]
         )
@@ -228,7 +247,7 @@ class UserService:
         is_valid_object(user, NotFoundEntity.USER)
 
         user.status = UserStatus.ACTIVE
-        self.user_repository.update(user.uuid, user)
+        return self.user_repository.update(user.uuid, user)
 
     def list(self, filters: UserFilter) -> tuple[int, list[User]]:
         self.access_service.authorization.check_access([AgentType.USER])

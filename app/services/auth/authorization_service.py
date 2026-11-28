@@ -1,4 +1,5 @@
 import uuid as uuid_pkg
+from collections.abc import Sequence
 
 from app.configs.error_codes import ErrorCode
 from app.configs.errors import NoAccessError
@@ -16,6 +17,7 @@ from app.dto.enum import (
     VisibilityLevel,
 )
 from app.repositories.permission_repository import PermissionRepository
+from app.repositories.utils import resolve_query_default
 
 
 class AuthorizationService:
@@ -28,7 +30,7 @@ class AuthorizationService:
     def check_access(
         self,
         allowed_agent_types: list[AgentType],
-        allowed_roles: list[UserRole] = (
+        allowed_roles: Sequence[UserRole] = (
             UserRole.USER,
             UserRole.ADMIN,
             UserRole.OWNER,
@@ -42,15 +44,20 @@ class AuthorizationService:
 
         if (
             self.current_agent.type == AgentType.USER
-            and not self._role_is_allowed(allowed_roles)
+            and not self.role_is_allowed(
+                self.current_agent.role, allowed_roles
+            )
         ):
             msg = f"{self.current_agent.__class__.__name__} access not allowed, only for {allowed_roles}"
             raise NoAccessError(msg, code=ErrorCode.ACCESS_ROLE_NOT_ALLOWED)
 
-    def _role_is_allowed(self, allowed_roles: list[UserRole]) -> bool:
+    @staticmethod
+    def role_is_allowed(
+        role: UserRole | str, allowed_roles: Sequence[UserRole]
+    ) -> bool:
         order = (UserRole.USER, UserRole.ADMIN, UserRole.OWNER)
         try:
-            level = order.index(self.current_agent.role)
+            level = order.index(role)
         except ValueError:
             return False
 
@@ -184,10 +191,15 @@ class AuthorizationService:
         ]
 
     def get_available_visibility_levels(
-        self, levels: list[str], restriction: list[str] = None
+        self,
+        levels: Sequence[str] | None,
+        restriction: Sequence[uuid_pkg.UUID] | None = None,
     ) -> list[VisibilityLevel]:
+        requested = resolve_query_default(levels) or []
         if self.current_agent.type == AgentType.BOT:
-            return [VisibilityLevel.PUBLIC]
-        if restriction:
-            return levels
-        return [VisibilityLevel.PUBLIC, VisibilityLevel.INTERNAL]
+            allowed = (VisibilityLevel.PUBLIC,)
+        elif restriction:
+            allowed = tuple(VisibilityLevel)
+        else:
+            allowed = (VisibilityLevel.PUBLIC, VisibilityLevel.INTERNAL)
+        return [level for level in allowed if level in requested]

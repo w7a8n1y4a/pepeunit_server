@@ -1,9 +1,10 @@
 import uuid as uuid_pkg
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Request, status
 
 from app.configs.rest import get_user_service
 from app.repositories.user_repository import UserFilter
+from app.schemas.bot.telegram_menu import TelegramMenu
 from app.schemas.pydantic.user import (
     AccessToken,
     AuthChallengeCreate,
@@ -71,30 +72,56 @@ async def get_verification(
 
 @router.patch("/grant_admin/{uuid}", response_model=UserRead)
 def grant_admin(
-    uuid: uuid_pkg.UUID, user_service: UserService = Depends(get_user_service)
-):
-    return UserRead(**user_service.grant_admin(uuid).dict())
+    uuid: uuid_pkg.UUID,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    user_service: UserService = Depends(get_user_service),
+) -> UserRead:
+    user = user_service.grant_admin(uuid)
+    TelegramMenu.schedule_refresh(
+        request, background_tasks, user.telegram_private_chat_id
+    )
+    return UserRead.model_validate(user, from_attributes=True)
 
 
 @router.patch("/revoke_admin/{uuid}", response_model=UserRead)
 def revoke_admin(
-    uuid: uuid_pkg.UUID, user_service: UserService = Depends(get_user_service)
-):
-    return UserRead(**user_service.revoke_admin(uuid).dict())
+    uuid: uuid_pkg.UUID,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    user_service: UserService = Depends(get_user_service),
+) -> UserRead:
+    user = user_service.revoke_admin(uuid)
+    TelegramMenu.schedule_refresh(
+        request, background_tasks, user.telegram_private_chat_id
+    )
+    return UserRead.model_validate(user, from_attributes=True)
 
 
 @router.patch("/block/{uuid}", status_code=status.HTTP_204_NO_CONTENT)
 def block(
-    uuid: uuid_pkg.UUID, user_service: UserService = Depends(get_user_service)
-):
-    return user_service.block(uuid)
+    uuid: uuid_pkg.UUID,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    user_service: UserService = Depends(get_user_service),
+) -> None:
+    user = user_service.block(uuid)
+    TelegramMenu.schedule_refresh(
+        request, background_tasks, user.telegram_private_chat_id
+    )
 
 
 @router.patch("/unblock/{uuid}", status_code=status.HTTP_204_NO_CONTENT)
 def unblock(
-    uuid: uuid_pkg.UUID, user_service: UserService = Depends(get_user_service)
-):
-    return user_service.unblock(uuid)
+    uuid: uuid_pkg.UUID,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    user_service: UserService = Depends(get_user_service),
+) -> None:
+    user = user_service.unblock(uuid)
+    TelegramMenu.schedule_refresh(
+        request, background_tasks, user.telegram_private_chat_id
+    )
 
 
 @router.get("", response_model=UsersResult)

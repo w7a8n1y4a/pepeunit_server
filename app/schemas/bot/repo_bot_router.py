@@ -1,85 +1,67 @@
-import contextlib
-from uuid import UUID
+import asyncio
+import uuid as uuid_pkg
+from urllib.parse import urlsplit
 
-from aiogram import types
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command
+from aiogram import F, types
 from aiogram.fsm.context import FSMContext
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app import runtime, settings
 from app.configs.db import get_hand_session
 from app.configs.errors import NoAccessError
 from app.configs.rest import get_bot_repo_service
+from app.domain.repo_model import Repo
 from app.dto.enum import (
     CommandNames,
+    CredentialStatus,
     DecreesNames,
     EntityNames,
+    FrontendEntityPath,
     RepoType,
+    TelegramCallback,
+    UuidEntity,
 )
 from app.schemas.bot.base_bot_router import (
     BaseBotFilters,
     BaseBotRouter,
+    BotPage,
     RepoStates,
 )
 from app.schemas.bot.utils import (
     byte_converter,
+    format_datetime,
     make_monospace_table_with_title,
 )
 from app.schemas.pydantic.repo import RepoFilter
+from app.services.validators import is_valid_uuid
 
 
-class RepoBotRouter(BaseBotRouter):
-    def __init__(self):
-        entity_name = EntityNames.REPO.value
-        super().__init__(entity_name=entity_name, states_group=RepoStates)
-        self.router.message(Command(CommandNames.REPO.value))(
-            self.repo_resolver
+class RepoBotRouter(BaseBotRouter[Repo]):
+    def __init__(self) -> None:
+        super().__init__(
+            EntityNames.REPO,
+            CommandNames.REPO,
+            search_state=RepoStates.waiting_for_search,
         )
+        self.router.callback_query(
+            F.data.startswith(self.callback_prefix(TelegramCallback.ITEM))
+        )(self.handle_entity_click)
+        self.router.callback_query(
+            F.data.startswith(self.callback_prefix(TelegramCallback.ACTION))
+        )(self.handle_entity_decrees)
 
-    async def repo_resolver(self, message: types.Message, state: FSMContext):
-        await state.set_state(None)
-        filters = BaseBotFilters()
-        await state.update_data(current_filters=filters)
-        await self.show_entities(message, filters)
-
-    async def show_entities(
-        self,
-        message: types.Message | types.CallbackQuery,
-        filters: BaseBotFilters,
-    ):
-        chat_id = (
-            message.chat.id
-            if isinstance(message, types.Message)
-            else message.from_user.id
-        )
-
-        entities, total_pages = await self.get_entities_page(
-            filters, str(chat_id)
-        )
-        keyboard = self.build_entities_keyboard(entities, filters, total_pages)
-
-        text = "*Repo*"
-        if filters.search_string:
-            text += f" - `{filters.search_string}`"
-
-        await self.telegram_response(message, text, keyboard)
-
-    async def get_entities_page(
+    def load_page(
         self, filters: BaseBotFilters, chat_id: str
-    ) -> tuple[list, int]:
+    ) -> BotPage[Repo]:
         with get_hand_session() as db:
             repo_service = get_bot_repo_service(db, chat_id)
+            if not filters.repository_types:
+                return BotPage(0, [], "Repositories")
 
             count, rows = repo_service.list(
                 RepoFilter(
-                    offset=(filters.page - 1)
-                    * runtime.get().pu_telegram_items_per_page,
-                    limit=runtime.get().pu_telegram_items_per_page,
-                    is_public_repository=self.repo_type_to_bool(
-                        filters.repository_types
-                    ),
+                    offset=filters.offset,
+                    limit=filters.page_size,
+                    is_public_repository=filters.is_public_repository,
                     creator_uuid=(
                         repo_service.access_service.current_agent.uuid
                         if filters.is_only_my_entity
@@ -88,192 +70,121 @@ class RepoBotRouter(BaseBotRouter):
                     search_string=filters.search_string,
                 )
             )
+        return BotPage(count, [repo for repo, _ in rows], "Repositories")
 
-            repos = [repo for repo, _child_unit_count in rows]
-            total_pages = (
-                count + runtime.get().pu_telegram_items_per_page - 1
-            ) // runtime.get().pu_telegram_items_per_page
-
-        return repos, total_pages
-
-    def build_entities_keyboard(
-        self, entities: list, filters: BaseBotFilters, total_pages: int
-    ) -> InlineKeyboardMarkup:
+    def build_list_keyboard(
+        self, items: list[Repo], filters: BaseBotFilters
+    ) -> InlineKeyboardBuilder:
         builder = InlineKeyboardBuilder()
-
-        filter_buttons = [
-            InlineKeyboardButton(
-                text="🔍 Search", callback_data=f"{self.entity_name}_search"
-            ),
-            InlineKeyboardButton(
-                text=("🟢 " if filters.is_only_my_entity else "🔴 ")
-                + "My repo",
-                callback_data=f"{self.entity_name}_toggle_mine",
-            ),
-        ]
-        builder.row(*filter_buttons)
-
-        filter_visibility_buttons = [
-            InlineKeyboardButton(
-                text=(
-                    "🟢 " if item.value in filters.repository_types else "🔴️ "
-                )
-                + item.value,
-                callback_data=f"{self.entity_name}_toggle_" + item.value,
-            )
-            for item in RepoType
-        ]
-        builder.row(*filter_visibility_buttons)
-
-        if entities:
-            for repo in entities:
-                builder.row(
-                    InlineKeyboardButton(
-                        text=f"{repo.platform} - {self.repo_name_limit(self.repo_url_small(repo.repository_url), 2)}",
-                        callback_data=f"{self.entity_name}_uuid_{repo.uuid}_{filters.page}",
-                    )
-                )
-        else:
-            builder.row(
-                InlineKeyboardButton(text="No Data", callback_data="noop")
-            )
-
-        if total_pages > 1:
-            pagination_row = []
-            if filters.page > 1:
-                pagination_row.append(
-                    InlineKeyboardButton(
-                        text="⬅️", callback_data=f"{self.entity_name}_prev_page"
-                    )
-                )
-
-            pagination_row.append(
-                InlineKeyboardButton(
-                    text=f"{filters.page}/{total_pages}", callback_data="noop"
-                )
-            )
-
-            if filters.page < total_pages:
-                pagination_row.append(
-                    InlineKeyboardButton(
-                        text="➡️", callback_data=f"{self.entity_name}_next_page"
-                    )
-                )
-            builder.row(*pagination_row)
-
-        return builder.as_markup()
-
-    async def handle_entity_click(
-        self, callback: types.CallbackQuery, state: FSMContext
-    ) -> None:
-        data = await state.get_data()
-        filters: BaseBotFilters = (
-            BaseBotFilters(**data.get("current_filters"))
-            if data.get("current_filters")
-            else BaseBotFilters()
+        self.add_search(
+            builder, filters, self.my_entities_button("My repos", filters)
         )
+        self.add_choices(builder, RepoType, filters.repository_types)
+        for repo in items:
+            name = self.header_name_limit(
+                self.display_url(repo.repository_url)
+            )
+            builder.row(
+                self.item_button(
+                    f"{repo.platform} · {name}", repo.uuid, filters.page
+                )
+            )
+        return builder
 
-        repo_uuid = UUID(callback.data.split("_")[-2])
-        current_page = int(callback.data.split("_")[-1])
+    @staticmethod
+    def display_url(url: str) -> str:
+        parsed = urlsplit(url)
+        return f"{parsed.netloc}{parsed.path.rstrip('/').removesuffix('.git')}"
 
-        if not filters.previous_filters:
-            filters.page = current_page
-            new_filters = BaseBotFilters(previous_filters=filters)
-            await state.update_data(current_filters=new_filters)
-
+    @staticmethod
+    def get_details(
+        repo_uuid: uuid_pkg.UUID, chat_id: str
+    ) -> tuple[Repo, bool, CredentialStatus | None]:
         with get_hand_session() as db:
-            repo_service = get_bot_repo_service(db, str(callback.from_user.id))
+            repo_service = get_bot_repo_service(db, chat_id)
             repo = repo_service.get(repo_uuid)
-
-            is_available = True
+            credentials = (
+                repo_service.get_credentials(repo.uuid)
+                if not repo.is_public_repository
+                else None
+            )
+            can_update = True
             try:
                 repo_service.access_service.authorization.check_repo_access(
                     repo
                 )
             except NoAccessError:
-                is_available = False
+                can_update = False
+            return (
+                repo,
+                can_update,
+                credentials.status if credentials else None,
+            )
 
-        text = f"*Repo* - `{self.repo_name_limit(self.repo_url_small(repo.repository_url), 1.25)}`"
-
-        text += "\n```text\n"
-
+    async def handle_entity_click(
+        self, callback: types.CallbackQuery, state: FSMContext
+    ) -> None:
+        repo_uuid, page = self.item_selection(callback)
+        repo, can_update, credential_status = await asyncio.to_thread(
+            self.get_details, repo_uuid, str(self.chat_id(callback))
+        )
+        filters = await self.detail_filters(
+            state, callback.message.message_id, page
+        )
         table = [
             ["Platform", repo.platform],
             ["Sync status", repo.sync_status],
-            [
-                "Sync last time",
-                (
-                    repo.sync_last_datetime.strftime("%Y-%m-%d %H:%M:%S")
-                    if repo.sync_last_datetime
-                    else None
-                ),
-            ],
+            ["Sync last time", format_datetime(repo.sync_last_datetime)],
             ["Sync error", repo.sync_error],
-            [
-                "Local size",
-                byte_converter(repo.local_repository_size),
-            ],
+            ["Local size", byte_converter(repo.local_repository_size)],
         ]
+        if credential_status is not None:
+            table.append(["Credentials", credential_status.value])
 
-        if not repo.is_public_repository:
-            credentials = repo_service.get_credentials(repo.uuid)
-            if credentials:
-                table.append(
-                    ["Creds status", credentials.status.value.capitalize()]
+        builder = InlineKeyboardBuilder()
+        if can_update:
+            builder.row(
+                types.InlineKeyboardButton(
+                    text="↻ Update local repository",
+                    callback_data=self.callback_data(
+                        TelegramCallback.ACTION,
+                        DecreesNames.LOCAL_UPDATE,
+                        repo.uuid,
+                    ),
                 )
-
-        text += make_monospace_table_with_title(
-            table, "Base Info", lengths=[15, 30]
-        )
-
-        text += "```"
-
-        keyboard = []
-        if is_available:
-            keyboard.append(
-                [
-                    InlineKeyboardButton(
-                        text="🫀 Update Local Repo",
-                        callback_data=f"{self.entity_name}_decres_{DecreesNames.LOCAL_UPDATE.value}_{repo.uuid}",
-                    ),
-                ],
             )
-
-        keyboard.extend(
-            [
-                [
-                    InlineKeyboardButton(
-                        text="← Back", callback_data=f"{self.entity_name}_back"
-                    ),
-                    InlineKeyboardButton(
-                        text="↻ Refresh",
-                        callback_data=f"{self.entity_name}_uuid_{repo.uuid}_{filters.page}",
-                    ),
-                    InlineKeyboardButton(
-                        text="Browser",
-                        url=f"{settings.pu_link}/repo/{repo.uuid}",
-                    ),
-                ],
-            ]
-        )
-
-        await callback.answer(parse_mode="Markdown")
-        with contextlib.suppress(TelegramBadRequest):
-            await self.telegram_response(
-                callback, text, InlineKeyboardMarkup(inline_keyboard=keyboard)
+        builder.row(
+            *self.detail_buttons(
+                repo.uuid,
+                filters.page,
+                self.browser_url(FrontendEntityPath.REPO, repo.uuid),
             )
+        )
+        await self.show_detail(
+            callback,
+            state,
+            filters,
+            self.display_url(repo.repository_url),
+            builder,
+            body=make_monospace_table_with_title(
+                table, "Repository", lengths=[15, 38]
+            ),
+        )
 
     async def handle_entity_decrees(
         self, callback: types.CallbackQuery
     ) -> None:
-        *_, decrees_type, repo_uuid = callback.data.split("_")
-        repo_uuid = UUID(repo_uuid)
-
+        action, repo_id = callback.data.removeprefix(
+            self.callback_prefix(TelegramCallback.ACTION)
+        ).rsplit(self.CALLBACK_SEPARATOR, 1)
+        if action != DecreesNames.LOCAL_UPDATE:
+            await self.expired_button(callback)
+            return
+        repo_uuid = is_valid_uuid(repo_id, UuidEntity.REPO)
         with get_hand_session() as db:
-            repo_service = get_bot_repo_service(db, str(callback.from_user.id))
-
-            match decrees_type:
-                case DecreesNames.LOCAL_UPDATE:
-                    repo_service.schedule_update(repo_uuid)
-
-        await callback.answer(parse_mode="Markdown")
+            task = get_bot_repo_service(
+                db, str(self.chat_id(callback))
+            ).schedule_update(repo_uuid)
+        await self.answer_callback(
+            callback, f"Repository update scheduled. Task {task.uuid}"
+        )

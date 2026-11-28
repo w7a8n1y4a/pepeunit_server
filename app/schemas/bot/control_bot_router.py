@@ -1,13 +1,10 @@
-from aiogram import types
+from aiogram import F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app import runtime
-from app.configs.clickhouse import get_hand_clickhouse_client
 from app.configs.db import get_hand_session
-from app.configs.errors import CustomException
 from app.configs.rest import (
     get_bot_peer_service,
     get_bot_repo_service,
@@ -18,118 +15,85 @@ from app.dto.enum import (
     CommandNames,
     DecreesNames,
     EntityNames,
+    TelegramCallback,
     UserRole,
 )
-from app.schemas.bot.base_bot_router import (
-    BaseBotFilters,
-    BaseBotRouter,
-    ControlStates,
-)
+from app.schemas.bot.telegram_router import TelegramRouter
 
 
-class ControlBotRouter(BaseBotRouter):
-    def __init__(self):
-        entity_name = EntityNames.CONTROL.value
-        super().__init__(entity_name=entity_name, states_group=ControlStates)
+class ControlBotRouter(TelegramRouter):
+    def __init__(self) -> None:
+        super().__init__(EntityNames.CONTROL)
         self.router.message(Command(CommandNames.CONTROL.value))(
-            self.control_resolver
+            self.show_control
         )
+        self.router.callback_query(
+            F.data.startswith(self.callback_prefix(TelegramCallback.ACTION))
+        )(self.handle_entity_decrees)
 
-    async def control_resolver(
+    async def show_control(
         self, message: types.Message, state: FSMContext
-    ):
-        await state.set_state(None)
-        filters = BaseBotFilters()
-        await state.update_data(current_filters=filters)
-        await self.show_entities(message, filters)
-
-    async def show_entities(
-        self,
-        message: types.Message | types.CallbackQuery,
-        filters: BaseBotFilters,
-    ):
-        chat_id = (
-            message.chat.id
-            if isinstance(message, types.Message)
-            else message.from_user.id
-        )
+    ) -> None:
+        await state.clear()
         with get_hand_session() as db:
-            get_bot_peer_service(
-                db, str(chat_id)
-            ).access_service.authorization.check_access(
-                [AgentType.USER],
-                [UserRole.ADMIN],
+            access = get_bot_peer_service(
+                db, str(self.chat_id(message))
+            ).access_service
+            access.authorization.check_access(
+                [AgentType.USER], [UserRole.ADMIN]
             )
 
-        keyboard = self.build_entities_keyboard([], filters, 0)
-        await self.telegram_response(message, "*Control*", keyboard)
-
-    async def get_entities_page(
-        self, _filters: BaseBotFilters, _chat_id: str
-    ) -> tuple[list, int]:
-        return [], 0
-
-    def build_entities_keyboard(
-        self,
-        _entities: list,
-        _filters: BaseBotFilters,
-        _total_pages: int,
-    ) -> InlineKeyboardMarkup:
-        builder = InlineKeyboardBuilder()
         actions = [
-            (DecreesNames.INTEGRATION_TESTS, "Integration Tests"),
+            (DecreesNames.INTEGRATION_TESTS, "Run integration tests"),
+            (DecreesNames.UPDATE_ALL_REPOS, "Update all repositories"),
+            (
+                DecreesNames.UPDATE_ALL_UNITS_FIRMWARE,
+                "Update all unit firmware",
+            ),
         ]
         if runtime.get().pu_ff_federation_enable:
-            actions.append((DecreesNames.SCAN_ALL, "Scan All Peers"))
-        actions.extend(
-            [
-                (DecreesNames.UPDATE_ALL_REPOS, "Update All Repos"),
-                (
-                    DecreesNames.UPDATE_ALL_UNITS_FIRMWARE,
-                    "Update All Units Firmware",
-                ),
-            ]
-        )
+            actions.insert(1, (DecreesNames.SCAN_ALL, "Scan all peers"))
+
+        builder = InlineKeyboardBuilder()
         for decree, label in actions:
             builder.row(
-                InlineKeyboardButton(
+                types.InlineKeyboardButton(
                     text=label,
-                    callback_data=f"{self.entity_name}_decres_{decree.value}_0",
+                    callback_data=self.callback_data(
+                        TelegramCallback.ACTION, decree
+                    ),
                 )
             )
-        return builder.as_markup()
-
-    async def handle_entity_click(
-        self, callback: types.CallbackQuery, _state: FSMContext
-    ) -> None:
-        await callback.answer()
+        await self.respond(
+            message, "Instance administration", builder.as_markup()
+        )
 
     async def handle_entity_decrees(
         self, callback: types.CallbackQuery
     ) -> None:
-        *_, decrees_type, _target = callback.data.split("_")
-        chat_id = str(callback.from_user.id)
-
-        try:
-            with get_hand_session() as db, get_hand_clickhouse_client() as cc:
-                match decrees_type:
-                    case DecreesNames.INTEGRATION_TESTS:
-                        get_bot_peer_service(
-                            db, chat_id
-                        ).start_integration_tests()
-                    case DecreesNames.SCAN_ALL:
-                        get_bot_peer_service(db, chat_id).scan_all()
-                    case DecreesNames.UPDATE_ALL_REPOS:
-                        get_bot_repo_service(db, chat_id).schedule_update_all()
-                    case DecreesNames.UPDATE_ALL_UNITS_FIRMWARE:
-                        get_bot_unit_service(
-                            db, cc, chat_id
-                        ).schedule_bulk_update_units_firmware()
-        except CustomException as e:
-            await callback.answer(parse_mode="Markdown")
-            await self.telegram_response(
-                callback, e.message, is_editable=False
-            )
-            return
-
-        await callback.answer(parse_mode="Markdown")
+        action = callback.data.removeprefix(
+            self.callback_prefix(TelegramCallback.ACTION)
+        ).split(self.CALLBACK_SEPARATOR, 1)[0]
+        chat_id = str(self.chat_id(callback))
+        with get_hand_session() as db:
+            match action:
+                case DecreesNames.INTEGRATION_TESTS:
+                    task = get_bot_peer_service(
+                        db, chat_id
+                    ).start_integration_tests()
+                case DecreesNames.SCAN_ALL:
+                    task = get_bot_peer_service(db, chat_id).scan_all()
+                case DecreesNames.UPDATE_ALL_REPOS:
+                    task = get_bot_repo_service(
+                        db, chat_id
+                    ).schedule_update_all()
+                case DecreesNames.UPDATE_ALL_UNITS_FIRMWARE:
+                    task = get_bot_unit_service(
+                        db, None, chat_id
+                    ).schedule_bulk_update_units_firmware()
+                case _:
+                    await self.expired_button(callback)
+                    return
+        await self.answer_callback(
+            callback, f"Operation scheduled. Task {task.uuid}"
+        )

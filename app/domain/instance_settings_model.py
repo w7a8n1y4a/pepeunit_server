@@ -7,6 +7,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlmodel import Field, SQLModel
 
 from app.domain.icon_model import Icon
+from app.dto.enum import TelegramBotMode
 
 
 class InstanceSettings(SQLModel, table=True):
@@ -156,7 +157,7 @@ class InstanceSettings(SQLModel, table=True):
         nullable=False, default="", max_length=512
     )
     pu_telegram_bot_mode: str = Field(
-        nullable=False, default="pooling", max_length=16
+        nullable=False, default=TelegramBotMode.POLLING.value, max_length=16
     )
     pu_telegram_git_hash_length: int = Field(nullable=False, default=8)
     pu_telegram_header_entity_length: int = Field(nullable=False, default=15)

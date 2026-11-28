@@ -1,13 +1,10 @@
-import json
 import logging
 from contextlib import asynccontextmanager
+from typing import Annotated
 
-from aiogram import Dispatcher, types
-from aiogram.fsm.storage.base import DefaultKeyBuilder
-from aiogram.fsm.storage.redis import RedisStorage
-from fastapi import FastAPI
+from aiogram import types
+from fastapi import FastAPI, Header, HTTPException, status
 from prometheus_fastapi_instrumentator import Instrumentator
-from pydantic import BaseModel
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -16,21 +13,10 @@ from app.configs.errors import CustomException
 from app.configs.logging_config import setup_logging
 from app.configs.rest import get_unit_service
 from app.configs.utils import recreate_directory
+from app.dto.enum import TelegramBotMode
 from app.routers.v1.endpoints import api_router
-from app.schemas.bot.control_bot_router import ControlBotRouter
-from app.schemas.bot.dashboard_bot_router import DashboardBotRouter
-from app.schemas.bot.error import error_router
-from app.schemas.bot.info import info_router
-from app.schemas.bot.notification_bot_router import NotificationBotRouter
-from app.schemas.bot.peer_bot_router import PeerBotRouter
-from app.schemas.bot.repo_bot_router import (
-    RepoBotRouter,
-)
-from app.schemas.bot.start_help import base_router
-from app.schemas.bot.unit_bot_router import UnitBotRouter
-from app.schemas.bot.unit_io_bot_router import UnitIOBotRouter
-from app.schemas.bot.unit_log_bot_router import UnitLogBotRouter
-from app.schemas.bot.utils import build_telegram_bot
+from app.schemas.bot.telegram_bot import TelegramBot
+from app.schemas.bot.telegram_dispatcher import TelegramDispatcher
 from app.schemas.mqtt.manager import mqtt_manager
 from app.services.mqtt_auth_service import MqttAuthService
 from app.services.startup_service import StartupService
@@ -48,8 +34,8 @@ async def _lifespan(_app: FastAPI):
     startup = StartupService(
         _app,
         mqtt_manager,
-        bot if runtime.get().pu_ff_telegram_bot_enable else None,
-        dp if runtime.get().pu_ff_telegram_bot_enable else None,
+        bot,
+        dp,
     )
     try:
         await startup.start()
@@ -99,52 +85,38 @@ app = FastAPI(
 app.add_middleware(CustomExceptionMiddleware)
 
 
-def custom_json_dumps(obj: dict, **kwargs):
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if isinstance(v, BaseModel):
-                obj[k] = v.model_dump()
+bot = TelegramBot.from_settings()
+dp = TelegramDispatcher.from_settings(bot) if bot is not None else None
 
-    return json.dumps(obj, **kwargs)
+if dp is not None:
+    app.state.telegram_menu = dp.menu
 
-
-bot = None
-dp = None
-if runtime.get().pu_ff_telegram_bot_enable:
-    bot = build_telegram_bot()
-
-if bot is not None:
-    storage = RedisStorage.from_url(
-        settings.pu_redis_url,
-        key_builder=DefaultKeyBuilder(with_destiny=True),
-        json_dumps=custom_json_dumps,
+    @app.post(
+        f"{settings.pu_app_prefix}{settings.pu_api_v1_prefix}/bot",
+        status_code=status.HTTP_204_NO_CONTENT,
     )
-    dp = Dispatcher(bot=bot, storage=storage)
-
-    dp.include_router(info_router)
-    dp.include_router(ControlBotRouter().router)
-    dp.include_router(PeerBotRouter().router)
-    dp.include_router(NotificationBotRouter().router)
-    dp.include_router(base_router)
-    dp.include_router(RepoBotRouter().router)
-    dp.include_router(UnitBotRouter().router)
-    dp.include_router(UnitIOBotRouter().router)
-    dp.include_router(UnitLogBotRouter().router)
-    if runtime.get().pu_ff_grafana_integration_enable:
-        dp.include_router(DashboardBotRouter().router)
-    dp.include_router(error_router)
-
-    @app.post(f"{settings.pu_app_prefix}{settings.pu_api_v1_prefix}/bot")
-    async def bot_webhook(update: dict):
-        if not runtime.get().pu_ff_telegram_bot_enable:
-            return {"status": "disabled"}
+    async def bot_webhook(
+        update: types.Update,
+        secret_token: Annotated[
+            str | None, Header(alias="X-Telegram-Bot-Api-Secret-Token")
+        ] = None,
+    ) -> None:
+        if not bot.accepts_webhook(secret_token):
+            msg = "Invalid Telegram webhook token"
+            raise HTTPException(status.HTTP_403_FORBIDDEN, msg)
+        instance = runtime.get()
+        if (
+            not instance.pu_ff_telegram_bot_enable
+            or instance.pu_telegram_bot_mode != TelegramBotMode.WEBHOOK
+        ):
+            return
         try:
-            telegram_update = types.Update(**update)
-            await dp.feed_update(bot=bot, update=telegram_update)
-        except Exception as e:
-            logging.error(f"Error processing telegram update: {e}")
-            # Return 200 to prevent telegram from retrying
-            return {"status": "error", "message": str(e)}
+            await dp.feed_update(bot=bot, update=update)
+        except Exception:
+            logging.exception(
+                "Could not process Telegram webhook update %s",
+                update.update_id,
+            )
 
 
 if runtime.get().pu_ff_prometheus_enable:

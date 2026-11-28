@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import re
 import time
 import uuid as uuid_pkg
 from collections import deque
@@ -8,7 +7,12 @@ from collections.abc import AsyncIterator
 from contextlib import suppress
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramRetryAfter,
+)
 from redis.exceptions import RedisError
 from starlette.requests import Request
 
@@ -17,6 +21,7 @@ from app.configs.redis import get_redis_session
 from app.domain.notification_model import Notification
 from app.domain.notification_settings_model import NotificationSettings
 from app.domain.user_model import User
+from app.dto.enum import UserStatus
 from app.schemas.pydantic.notification import NotificationRead
 
 
@@ -27,23 +32,13 @@ class TelegramAlertQueue:
     shared rate. Chats take turns, so one chat does not hold the rest.
     """
 
-    _MARKDOWN = re.compile(r"([_*`\[])")
-
     def __init__(
         self,
         user_interval: float | None = None,
         instance_rate: int | None = None,
     ) -> None:
-        self.user_interval = (
-            runtime.get().pu_notification_telegram_user_interval_seconds
-            if user_interval is None
-            else user_interval
-        )
-        self.instance_rate = (
-            runtime.get().pu_notification_telegram_instance_rate
-            if instance_rate is None
-            else instance_rate
-        )
+        self.user_interval_override = user_interval
+        self.instance_rate_override = instance_rate
         # Lines still waiting, and the order in which chats take a turn.
         self._lines: dict[str, deque[str]] = {}
         self._turns: deque[str] = deque()
@@ -52,23 +47,24 @@ class TelegramAlertQueue:
         self._arrived = asyncio.Event()
         self.ready = asyncio.Event()
 
-    @staticmethod
-    def text(text: str) -> str:
-        """The table or the log, as a monospace block."""
-        # A line of the log can contain the fence and break Markdown.
-        safe = text.replace("```", "'''")
-        return f"\n```text\n{safe}```"
+    @property
+    def user_interval(self) -> float:
+        if self.user_interval_override is not None:
+            return self.user_interval_override
+        return runtime.get().pu_notification_telegram_user_interval_seconds
 
-    def plain(self, text: str) -> str:
-        """One line. `_` and `*` would otherwise start Markdown."""
-        return self._MARKDOWN.sub(r"\\\1", text)
+    @property
+    def instance_rate(self) -> int:
+        if self.instance_rate_override is not None:
+            return self.instance_rate_override
+        return runtime.get().pu_notification_telegram_instance_rate
 
     def enqueue(self, chat_id: str, text: str) -> None:
-        if not self.ready.is_set():
+        if not self.ready.is_set() or not text:
             return
 
         limit = runtime.get().pu_notification_telegram_alert_text_limit
-        line = self.plain(text)[:limit]
+        line = text[:limit]
         waiting = self._lines.get(chat_id)
         if waiting is None:
             waiting = deque()
@@ -81,26 +77,33 @@ class TelegramAlertQueue:
         self.ready.set()
         while True:
             chat_id, text = await self._wait_for_line()
-            await self._send(bot, chat_id, text)
+            await self.send(bot, chat_id, text)
             self._mark_sent(chat_id, time.monotonic())
 
-    async def _send(self, bot: Bot, chat_id: str, text: str) -> None:
-        try:
-            await bot.send_message(
-                chat_id=chat_id, text=text, parse_mode="Markdown"
-            )
-        except asyncio.CancelledError:
-            raise
-        except TelegramBadRequest as err:
-            if "chat not found" not in err.message.casefold():
-                logging.error("Failed to send telegram alert: %s", err)
+    async def send(self, bot: Bot, chat_id: str, text: str) -> None:
+        while True:
+            try:
+                await bot.send_message(
+                    chat_id=chat_id, text=text, parse_mode=None
+                )
                 return
-            logging.warning(
-                "Telegram alert skipped, chat %s was not found", chat_id
-            )
-            self._forget_chat(chat_id)
-        except Exception as err:
-            logging.error("Failed to send telegram alert: %s", err)
+            except TelegramRetryAfter as error:
+                await asyncio.sleep(error.retry_after)
+            except (TelegramBadRequest, TelegramForbiddenError) as error:
+                if (
+                    isinstance(error, TelegramForbiddenError)
+                    or "chat not found" in error.message.casefold()
+                ):
+                    self._forget_chat(chat_id)
+                logging.warning(
+                    "Could not send Telegram alert to %s: %s", chat_id, error
+                )
+                return
+            except TelegramAPIError as error:
+                logging.warning(
+                    "Could not send Telegram alert to %s: %s", chat_id, error
+                )
+                return
 
     def _forget_chat(self, chat_id: str) -> None:
         """A missing chat will not appear, so the rest of its lines go too."""
@@ -226,12 +229,14 @@ class NotificationDelivery:
     ) -> None:
         for notification, user, settings_row in pending:
             try:
+                chat_id = user.telegram_private_chat_id
                 if (
                     settings_row.is_telegram_alert_enable
-                    and user.telegram_chat_id
+                    and user.status == UserStatus.ACTIVE
+                    and chat_id is not None
                 ):
                     self.telegram.enqueue(
-                        user.telegram_chat_id, notification.small_text
+                        str(chat_id), notification.small_text
                     )
             except TypeError, ValueError:
                 logging.exception(

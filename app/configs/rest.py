@@ -58,6 +58,7 @@ from app.services.operation_task_service import OperationTaskService
 from app.services.peer_service import PeerService
 from app.services.permission_service import PermissionService
 from app.services.repo_service import RepoService
+from app.services.telegram_command_service import TelegramCommandService
 from app.services.unit_group_service import UnitGroupService
 from app.services.unit_io_service import UnitIOService
 from app.services.unit_manifest_service import UnitManifestService
@@ -133,6 +134,9 @@ class ServiceFactory:
                 self.notification_settings_repository
             ),
         )
+
+    def get_telegram_command_service(self) -> TelegramCommandService:
+        return TelegramCommandService(self.user_repository)
 
     def get_instance_resources_service(self) -> InstanceResourcesService:
         return InstanceResourcesService(
@@ -410,7 +414,7 @@ def get_notification_service(
 
 def create_bot_service_factory(
     db: Session = Depends(get_session),
-    client: Client = Depends(get_clickhouse_client),
+    client: Client | None = Depends(get_clickhouse_client),
     jwt_token: str | None = Depends(token_depends),
 ) -> ServiceFactory:
     return ServiceFactory(db, client, jwt_token, True)
@@ -418,7 +422,7 @@ def create_bot_service_factory(
 
 def get_bot_user_service(
     db: Session = Depends(get_session),
-    client: Client = Depends(get_clickhouse_client),
+    client: Client | None = Depends(get_clickhouse_client),
     jwt_token: str | None = Depends(token_depends),
 ) -> UserService:
     return create_bot_service_factory(db, client, jwt_token).get_user_service()
@@ -433,7 +437,7 @@ def get_bot_repo_service(
 
 def get_bot_unit_service(
     db: Session = Depends(get_session),
-    client: Client = Depends(get_clickhouse_client),
+    client: Client | None = Depends(get_clickhouse_client),
     jwt_token: str | None = Depends(token_depends),
 ) -> UnitService:
     return create_bot_service_factory(db, client, jwt_token).get_unit_service()

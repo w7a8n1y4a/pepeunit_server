@@ -1,95 +1,95 @@
-import contextlib
+import asyncio
 import json
-import os
-from uuid import UUID
+import math
+import uuid as uuid_pkg
+from contextlib import suppress
+from dataclasses import dataclass
+from pathlib import Path
 
-from aiogram import types
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command
+from aiogram import F, types
 from aiogram.fsm.context import FSMContext
-from aiogram.types import (
-    FSInputFile,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from aiogram.types import BufferedInputFile, FSInputFile, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app import runtime, settings
+from app import runtime
 from app.configs.clickhouse import get_hand_clickhouse_client
 from app.configs.db import get_hand_session
-from app.configs.rest import (
-    get_bot_unit_io_service,
-    get_bot_unit_service,
-)
+from app.configs.errors import GitRepoError, NoAccessError
+from app.configs.rest import get_bot_unit_service
+from app.domain.unit_model import Unit
 from app.dto.enum import (
     BackendTopicCommand,
     CommandNames,
     DecreesNames,
     EntityNames,
+    FrontendEntityPath,
+    OwnershipType,
+    TelegramCallback,
     UnitFirmwareUpdateStatus,
+    UuidEntity,
     VisibilityLevel,
 )
 from app.schemas.bot.base_bot_router import (
     BaseBotFilters,
     BaseBotRouter,
+    BotPage,
     UnitStates,
 )
 from app.schemas.bot.utils import (
     byte_converter,
     calculate_flash_mem,
+    format_datetime,
     format_millis,
     make_monospace_table_with_title,
 )
-from app.schemas.pydantic.unit import UnitFilter
+from app.schemas.pydantic.unit import (
+    SelectedVersionRead,
+    UnitFilter,
+    UnitRead,
+    UnitStateRead,
+)
+from app.services.validators import is_valid_uuid
 
 
-class UnitBotRouter(BaseBotRouter):
-    def __init__(self):
-        entity_name = EntityNames.UNIT.value
+@dataclass(frozen=True, slots=True)
+class UnitCard:
+    unit: UnitRead
+    is_creator: bool
+    selected_version: SelectedVersionRead | None = None
+    version_error: str | None = None
+    commands: tuple[BackendTopicCommand, ...] = ()
 
-        super().__init__(entity_name=entity_name, states_group=UnitStates)
-        self.router.message(Command(CommandNames.UNIT))(self.unit_resolver)
 
-    async def unit_resolver(self, message: types.Message, state: FSMContext):
-        await state.set_state(None)
-        filters = BaseBotFilters()
-        await state.update_data(current_filters=filters)
-        await self.show_entities(message, filters)
+class UnitBotRouter(BaseBotRouter[Unit]):
+    ARCHIVES = (DecreesNames.TGZ, DecreesNames.TAR, DecreesNames.ZIP)
+    NETWORK_CONFIG_FIELDS = ("IP", "Subnet", "Gateway", "DNS")
+    FLASH_MEMORY_FIELDS = 4
+    ENV_TITLE = "Unit environment"
+    ENV_FILENAME = "env.json"
 
-    async def show_entities(
-        self,
-        message: types.Message | types.CallbackQuery,
-        filters: BaseBotFilters,
-    ):
-        chat_id = (
-            message.chat.id
-            if isinstance(message, types.Message)
-            else message.from_user.id
+    def __init__(self) -> None:
+        super().__init__(
+            EntityNames.UNIT,
+            CommandNames.UNIT,
+            search_state=UnitStates.waiting_for_search,
         )
+        self.router.callback_query(
+            F.data.startswith(self.callback_prefix(TelegramCallback.ITEM))
+        )(self.handle_entity_click)
+        self.router.callback_query(
+            F.data.startswith(self.callback_prefix(TelegramCallback.ACTION))
+        )(self.handle_entity_decrees)
 
-        entities, total_pages = await self.get_entities_page(
-            filters, str(chat_id)
-        )
-        keyboard = self.build_entities_keyboard(entities, filters, total_pages)
-
-        text = "*Units*"
-        if filters.search_string:
-            text += f" - `{filters.search_string}`"
-
-        await self.telegram_response(message, text, keyboard)
-
-    async def get_entities_page(
+    def load_page(
         self, filters: BaseBotFilters, chat_id: str
-    ) -> tuple[list, int]:
-        with get_hand_session() as db, get_hand_clickhouse_client() as cc:
-            unit_service = get_bot_unit_service(db, cc, chat_id)
-
-            count, units = unit_service.list(
+    ) -> BotPage[Unit]:
+        with get_hand_session() as db:
+            unit_service = get_bot_unit_service(db, None, chat_id)
+            count, rows = unit_service.list(
                 UnitFilter(
-                    offset=(filters.page - 1)
-                    * runtime.get().pu_telegram_items_per_page,
-                    limit=runtime.get().pu_telegram_items_per_page,
-                    visibility_level=filters.visibility_levels or [],
+                    offset=filters.offset,
+                    limit=filters.page_size,
+                    visibility_level=filters.visibility_levels,
                     creator_uuid=(
                         unit_service.access_service.current_agent.uuid
                         if filters.is_only_my_entity
@@ -98,435 +98,338 @@ class UnitBotRouter(BaseBotRouter):
                     search_string=filters.search_string,
                 )
             )
+        return BotPage(count, [unit for unit, _ in rows], "Units")
 
-            total_pages = (
-                count + runtime.get().pu_telegram_items_per_page - 1
-            ) // runtime.get().pu_telegram_items_per_page
-
-        return units, total_pages
-
-    def build_entities_keyboard(
-        self, entities: list, filters: BaseBotFilters, total_pages: int
-    ) -> InlineKeyboardMarkup:
+    def build_list_keyboard(
+        self, items: list[Unit], filters: BaseBotFilters
+    ) -> InlineKeyboardBuilder:
         builder = InlineKeyboardBuilder()
-        filter_buttons = [
-            InlineKeyboardButton(
-                text="🔍 Search",
-                callback_data=f"{self.entity_name}_search",
-            ),
-            InlineKeyboardButton(
-                text=("🟢 " if filters.is_only_my_entity else "🔴 ")
-                + "My units",
-                callback_data=f"{self.entity_name}_toggle_mine",
-            ),
-        ]
-        builder.row(*filter_buttons)
-
-        filter_visibility_buttons = [
-            InlineKeyboardButton(
-                text=(
-                    "🟢 " if item.value in filters.visibility_levels else "🔴️ "
-                )
-                + item.value,
-                callback_data=f"{self.entity_name}_toggle_" + item.value,
-            )
-            for item in VisibilityLevel
-        ]
-        builder.row(*filter_visibility_buttons)
-
-        if entities:
-            for unit, _nodes in entities:
-                builder.row(
-                    InlineKeyboardButton(
-                        text=f"{self.header_name_limit(unit.name)} - {unit.visibility_level}",
-                        callback_data=f"{self.entity_name}_uuid_{unit.uuid}_{filters.page}",
-                    )
-                )
-        else:
+        self.add_search(
+            builder, filters, self.my_entities_button("My units", filters)
+        )
+        self.add_choices(builder, VisibilityLevel, filters.visibility_levels)
+        for unit in items:
+            name = self.header_name_limit(unit.name)
             builder.row(
-                InlineKeyboardButton(text="No Data", callback_data="noop")
-            )
-
-        if total_pages > 1:
-            pagination_row = []
-            if filters.page > 1:
-                pagination_row.append(
-                    InlineKeyboardButton(
-                        text="⬅️", callback_data=f"{self.entity_name}_prev_page"
-                    )
-                )
-
-            pagination_row.append(
-                InlineKeyboardButton(
-                    text=f"{filters.page}/{total_pages}", callback_data="noop"
+                self.item_button(
+                    f"{name} · {unit.visibility_level}",
+                    unit.uuid,
+                    filters.page,
                 )
             )
+        return builder
 
-            if filters.page < total_pages:
-                pagination_row.append(
-                    InlineKeyboardButton(
-                        text="➡️", callback_data=f"{self.entity_name}_next_page"
-                    )
+    @staticmethod
+    def get_unit_card(unit_uuid: uuid_pkg.UUID, chat_id: str) -> UnitCard:
+        with get_hand_session() as db:
+            service = get_bot_unit_service(db, None, chat_id)
+            row = service.get(unit_uuid)
+            unit = UnitRead(**row.to_dict())
+            try:
+                service.access_service.authorization.check_ownership(
+                    row, [OwnershipType.CREATOR]
                 )
-            builder.row(*pagination_row)
+            except NoAccessError:
+                return UnitCard(unit, is_creator=False)
 
-        return builder.as_markup()
+            selected_version = None
+            version_error = None
+            try:
+                selected_version = service.get_selected_version(unit_uuid)
+            except GitRepoError as error:
+                version_error = error.raw_message
+
+            commands = tuple(service.unit_io_service.list_commands(unit_uuid))
+            return UnitCard(
+                unit, True, selected_version, version_error, commands
+            )
 
     async def handle_entity_click(
         self, callback: types.CallbackQuery, state: FSMContext
     ) -> None:
-        filters = await self._get_filters(state, callback)
-        unit, selected_version, commands, is_creator = self._get_unit_data(
-            callback
+        unit_uuid, page = self.item_selection(callback)
+        card = await asyncio.to_thread(
+            self.get_unit_card, unit_uuid, str(self.chat_id(callback))
+        )
+        filters = await self.detail_filters(
+            state, callback.message.message_id, page
+        )
+        builder = self.build_card_keyboard(card, filters)
+        unit = card.unit
+        await self.show_detail(
+            callback,
+            state,
+            filters,
+            f"{self.header_name_limit(unit.name)} · {unit.visibility_level.value}",
+            builder,
+            body=self.card_text(card),
         )
 
-        text = self._build_unit_info_text(unit, selected_version)
-        if unit.unit_state:
-            text += self._build_unit_state_text(unit)
-
-        text += "```"
-
-        keyboard = self._build_keyboard(
-            unit, is_creator, commands, selected_version, filters
-        )
-
-        await callback.answer(parse_mode="Markdown")
-        with contextlib.suppress(TelegramBadRequest):
-            await self.telegram_response(
-                callback, text, InlineKeyboardMarkup(inline_keyboard=keyboard)
-            )
-
-    async def _get_filters(
-        self, state: FSMContext, callback: types.CallbackQuery
-    ) -> BaseBotFilters:
-        data = await state.get_data()
-        filters: BaseBotFilters = (
-            BaseBotFilters(**data.get("current_filters"))
-            if data.get("current_filters")
-            else BaseBotFilters()
-        )
-
-        current_page = int(callback.data.split("_")[-1])
-
-        if not filters.previous_filters:
-            filters.page = current_page
-            new_filters = BaseBotFilters(previous_filters=filters)
-            await state.update_data(current_filters=new_filters)
-
-        return filters
-
-    def _get_unit_data(self, callback: types.CallbackQuery):
-        unit_uuid = UUID(callback.data.split("_")[-2])
-
-        with get_hand_session() as db, get_hand_clickhouse_client() as cc:
-            unit_service = get_bot_unit_service(
-                db, cc, str(callback.from_user.id)
-            )
-
-            unit = unit_service.mapper_unit_to_unit_read(
-                (unit_service.get(unit_uuid), [])
-            )
-
-            try:
-                selected_version = unit_service.get_selected_version(unit_uuid)
-            except Exception:
-                selected_version = None
-
-            is_creator = (
-                unit_service.access_service.current_agent.uuid
-                == unit.creator_uuid
-            )
-            commands = (
-                unit_service.unit_io_service.list_commands(unit_uuid)
-                if is_creator
-                else []
-            )
-
-        return unit, selected_version, commands, is_creator
-
-    def _build_unit_info_text(self, unit, selected_version):
-        text = f"*Unit* - `{self.header_name_limit(unit.name)}` - *{unit.visibility_level}*\n```text\n"
-
+    def card_text(self, card: UnitCard) -> str:
+        unit = card.unit
         table = [
-            ["Auto-update ?", unit.is_auto_update_unit],
-            ["Tags only ?", unit.is_only_tag_update],
-            [
-                "Branch",
-                self.header_name_limit(unit.target_branch)
-                if unit.target_branch
-                else None,
-            ],
+            ["Auto-update", unit.is_auto_update_unit],
+            ["Tags only", unit.is_only_tag_update],
+            ["Branch", unit.target_branch],
+            ["Compiled firmware", unit.is_compilable_unit],
         ]
-
         if not unit.is_auto_update_unit:
             table.append(
-                [
-                    "Commit",
-                    self.git_hash_limit(unit.target_commit)
-                    if unit.target_commit
-                    else None,
-                ]
+                ["Pinned commit", self.short_commit(unit.target_commit)]
             )
-
-        table.append(["Compilable ?", unit.is_compilable_unit])
-
         if unit.is_compilable_unit:
-            table.append(
-                [
-                    "Compilable Platform",
-                    self.header_name_limit(unit.target_firmware_platform)
-                    if unit.target_firmware_platform
-                    else None,
-                ]
-            )
+            table.append(["Platform", unit.target_firmware_platform])
 
-        text += (
-            make_monospace_table_with_title(
-                table, "Base Info", lengths=[15, 35]
-            )
-            + "\n"
-        )
-
-        if selected_version:
-            text += self._build_version_info(unit, selected_version)
-
-        return text
-
-    def _build_version_info(self, unit, selected_version):
-        device_commit_short = (
-            self.git_hash_limit(unit.current_commit_version)
-            if unit.current_commit_version
-            else None
-        )
-        selected_commit_short = (
-            self.git_hash_limit(selected_version.commit)
-            if selected_version.commit
-            else None
-        )
-
-        if (
-            not unit.firmware_update_status
-            and device_commit_short == selected_commit_short
-        ):
-            status = UnitFirmwareUpdateStatus.SUCCESS
-        elif (
-            not unit.firmware_update_status
-            and device_commit_short != selected_commit_short
-        ):
-            status = "Need"
-        elif not selected_commit_short and not device_commit_short:
-            status = "No Data"
-        else:
-            status = unit.firmware_update_status
-
-        table = [
-            ["Current Version", device_commit_short],
-            ["Selected Version", selected_commit_short],
-            ["Update status", status],
+        sections = [
+            make_monospace_table_with_title(table, "Unit", lengths=[18, 38])
         ]
+        if card.selected_version is not None or card.version_error is not None:
+            sections.append(self.version_info(card))
+        if unit.unit_state is not None:
+            sections.append(self.state_info(unit.unit_state))
+        return "\n".join(section for section in sections if section)
 
-        if (
-            unit.firmware_update_status
-            == UnitFirmwareUpdateStatus.REQUEST_SENT
-        ):
+    @staticmethod
+    def short_commit(commit: str | None) -> str | None:
+        if commit is None:
+            return None
+        return commit[: runtime.get().pu_telegram_git_hash_length]
+
+    def version_info(self, card: UnitCard) -> str:
+        unit = card.unit
+        target_commit = (
+            card.selected_version.commit
+            if card.selected_version is not None
+            else None
+        )
+        status = unit.firmware_update_status
+        if status is not None:
+            status_text = status.value
+        elif unit.current_commit_version and target_commit:
+            status_text = (
+                "Up to date"
+                if unit.current_commit_version == target_commit
+                else "Update available"
+            )
+        else:
+            status_text = "Unknown"
+        table = [
+            ["Device commit", self.short_commit(unit.current_commit_version)],
+            ["Selected commit", self.short_commit(target_commit)],
+            ["Update status", status_text],
+        ]
+        if card.selected_version is not None and card.selected_version.tag:
+            table.append(["Selected tag", card.selected_version.tag])
+        if card.version_error:
+            table.append(["Version error", card.version_error])
+        if status == UnitFirmwareUpdateStatus.REQUEST_SENT:
             table.append(
                 [
-                    "Request Update",
-                    unit.last_firmware_update_datetime.strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    ),
+                    "Requested at",
+                    format_datetime(unit.last_firmware_update_datetime),
                 ]
             )
-
         if (
-            unit.firmware_update_status == UnitFirmwareUpdateStatus.ERROR
+            status == UnitFirmwareUpdateStatus.ERROR
             and unit.firmware_update_error
         ):
-            table.append(["Update Error", unit.firmware_update_error])
+            table.append(["Update error", unit.firmware_update_error])
+        return make_monospace_table_with_title(
+            table, "Firmware", lengths=[15, 38]
+        )
 
-        return make_monospace_table_with_title(table, "Firmware Info")
-
-    def _build_unit_state_text(self, unit):
-        table = []
-
-        if len(unit.unit_state.ifconfig) == 4:
-            table.extend(
-                [
-                    ["IP", unit.unit_state.ifconfig[0]],
-                    ["Sub", unit.unit_state.ifconfig[1]],
-                    ["Gate", unit.unit_state.ifconfig[2]],
-                    ["DNS", unit.unit_state.ifconfig[3]],
-                ]
+    def state_info(self, state: UnitStateRead) -> str:
+        table = [
+            [label, value]
+            for label, value in zip(
+                self.NETWORK_CONFIG_FIELDS, state.ifconfig, strict=False
             )
-
-        if (
-            unit.unit_state.freq
-            or unit.unit_state.millis
-            or unit.unit_state.mem_alloc
-            or unit.unit_state.mem_free
+        ]
+        for label, value, as_bytes in (
+            ("Frequency", state.freq, False),
+            ("Allocated RAM", state.mem_alloc, True),
+            ("Free RAM", state.mem_free, True),
         ):
-            if unit.unit_state.freq:
-                table.append(["Freq", round(unit.unit_state.freq, 1)])
-            if unit.unit_state.millis:
-                table.append(["Up", format_millis(unit.unit_state.millis)])
-            if unit.unit_state.mem_alloc:
+            if value is not None and math.isfinite(value):
                 table.append(
-                    ["Alloc RAM", byte_converter(unit.unit_state.mem_alloc)]
-                )
-            if unit.unit_state.mem_free:
-                table.append(
-                    ["Free RAM", byte_converter(unit.unit_state.mem_free)]
-                )
-
-        if len(unit.unit_state.statvfs) == 10:
-            total, free, used = calculate_flash_mem(unit.unit_state.statvfs)
-            table.extend(
-                [
-                    ["Total", byte_converter(round(total, 0))],
-                    ["Free", byte_converter(round(free, 0))],
-                    ["Used", byte_converter(round(used, 0))],
-                ]
-            )
-
-        return "\n" + make_monospace_table_with_title(table, "Unit State")
-
-    def _build_keyboard(
-        self, unit, is_creator, commands, selected_version, filters
-    ):
-        keyboard = []
-
-        if is_creator:
-            keyboard.append(
-                [
-                    InlineKeyboardButton(
-                        text="💰 Get Env",
-                        callback_data=f"{self.entity_name}_decres_{DecreesNames.GET_ENV.value}_{unit.uuid}",
-                    ),
-                ]
-            )
-
-            if commands:
-                keyboard.append(
                     [
-                        InlineKeyboardButton(
-                            text=command.value,
-                            callback_data=f"{self.entity_name}_decres_{command.value}_{unit.uuid}",
-                        )
-                        for command in commands
+                        label,
+                        byte_converter(value) if as_bytes else round(value, 1),
                     ]
                 )
+        if state.millis is not None and math.isfinite(state.millis):
+            with suppress(ValueError, OverflowError, OSError):
+                table.append(["Time / uptime", format_millis(state.millis)])
 
-            if selected_version:
-                commands = [
-                    DecreesNames.TGZ.value,
-                    DecreesNames.TAR.value,
-                    DecreesNames.ZIP.value,
+        flash_memory = state.statvfs[: self.FLASH_MEMORY_FIELDS]
+        if len(flash_memory) == self.FLASH_MEMORY_FIELDS and all(
+            isinstance(value, int | float) for value in flash_memory
+        ):
+            total, free, used = calculate_flash_mem(flash_memory)
+            table.extend(
+                [
+                    ["Flash total", byte_converter(total)],
+                    ["Flash free", byte_converter(free)],
+                    ["Flash used", byte_converter(used)],
                 ]
-                keyboard.append(
-                    [
+            )
+        return make_monospace_table_with_title(
+            table, "Unit state", lengths=[15, 38]
+        )
+
+    def build_card_keyboard(
+        self, card: UnitCard, filters: BaseBotFilters
+    ) -> InlineKeyboardBuilder:
+        builder = InlineKeyboardBuilder()
+        unit_uuid = card.unit.uuid
+        if card.is_creator:
+            builder.row(
+                InlineKeyboardButton(
+                    text="Get environment",
+                    callback_data=self.callback_data(
+                        TelegramCallback.ACTION,
+                        DecreesNames.GET_ENV,
+                        unit_uuid,
+                    ),
+                )
+            )
+            if card.commands:
+                builder.row(
+                    *[
                         InlineKeyboardButton(
-                            text=f"💾 {command}",
-                            callback_data=f"{self.entity_name}_decres_{command}_{unit.uuid}",
+                            text=command.value,
+                            callback_data=self.callback_data(
+                                TelegramCallback.ACTION, command, unit_uuid
+                            ),
                         )
-                        for command in commands
+                        for command in card.commands
+                    ],
+                    width=self.FILTER_BUTTONS_PER_ROW,
+                )
+            if card.selected_version is not None:
+                builder.row(
+                    *[
+                        InlineKeyboardButton(
+                            text=archive.value,
+                            callback_data=self.callback_data(
+                                TelegramCallback.ACTION, archive, unit_uuid
+                            ),
+                        )
+                        for archive in self.ARCHIVES
                     ]
                 )
 
         buttons = [
             InlineKeyboardButton(
-                text="🎯 Unit IO",
-                callback_data=f"{EntityNames.UNIT_IO.value}_unit_{unit.uuid}",
-            ),
+                text="Unit IO",
+                callback_data=self.CALLBACK_SEPARATOR.join(
+                    (
+                        EntityNames.UNIT_IO.value,
+                        TelegramCallback.UNIT,
+                        str(unit_uuid),
+                    )
+                ),
+            )
         ]
-
-        if is_creator:
+        if card.is_creator:
             buttons.append(
                 InlineKeyboardButton(
-                    text="📝 Unit Logs",
-                    callback_data=f"{EntityNames.UNIT_LOG.value}_unit_{unit.uuid}",
+                    text="Unit logs",
+                    callback_data=self.CALLBACK_SEPARATOR.join(
+                        (
+                            EntityNames.UNIT_LOG.value,
+                            TelegramCallback.UNIT,
+                            str(unit_uuid),
+                        )
+                    ),
                 )
             )
-
-        keyboard.append(buttons)
-
-        keyboard.append(
-            [
-                InlineKeyboardButton(
-                    text="← Back", callback_data=f"{self.entity_name}_back"
-                ),
-                InlineKeyboardButton(
-                    text="↻ Refresh",
-                    callback_data=f"{self.entity_name}_uuid_{unit.uuid}_{filters.page}",
-                ),
-                InlineKeyboardButton(
-                    text="Browser",
-                    url=f"{settings.pu_link}/unit/{unit.uuid}",
-                ),
-            ]
+        builder.row(*buttons)
+        builder.row(
+            *self.detail_buttons(
+                unit_uuid,
+                filters.page,
+                self.browser_url(FrontendEntityPath.UNIT, unit_uuid),
+            )
         )
-
-        return keyboard
+        return builder
 
     async def handle_entity_decrees(
         self, callback: types.CallbackQuery
     ) -> None:
-        *_, decrees_type, unit_uuid = callback.data.split("_")
-        unit_uuid = UUID(unit_uuid)
+        action, unit_id = callback.data.removeprefix(
+            self.callback_prefix(TelegramCallback.ACTION)
+        ).rsplit(self.CALLBACK_SEPARATOR, 1)
+        unit_uuid = is_valid_uuid(unit_id, UuidEntity.UNIT)
+        chat_id = str(self.chat_id(callback))
+
+        if action == DecreesNames.GET_ENV:
+            env = await asyncio.to_thread(self.read_env, unit_uuid, chat_id)
+            await self.send_env(callback, env)
+            return
+        if action in self.ARCHIVES:
+            path, filename = self.build_archive(
+                unit_uuid, chat_id, DecreesNames(action)
+            )
+            try:
+                await callback.bot.send_document(
+                    chat_id=self.chat_id(callback),
+                    document=FSInputFile(path, filename=filename),
+                )
+            finally:
+                path.unlink(missing_ok=True)
+            await self.answer_callback(callback)
+            return
+        if action not in BackendTopicCommand:
+            await self.expired_button(callback)
+            return
+
+        command = BackendTopicCommand(action)
         with get_hand_session() as db, get_hand_clickhouse_client() as cc:
-            unit_service = get_bot_unit_service(
-                db, cc, str(callback.from_user.id)
+            service = get_bot_unit_service(db, cc, chat_id)
+            sent = service.unit_io_service.command_to_input_base_topic(
+                unit_uuid, command
             )
-            unit_io_service = get_bot_unit_io_service(
-                db, cc, str(callback.from_user.id)
+        if sent:
+            await self.answer_callback(
+                callback, f"{command.value} sent to unit."
+            )
+        else:
+            await self.answer_callback(
+                callback,
+                "This command is no longer available. Refresh the unit card.",
+                show_alert=True,
             )
 
-            text = ""
-            match decrees_type:
-                case DecreesNames.GET_ENV:
-                    text += "\n```json\n"
-                    text += json.dumps(
-                        unit_service.get_env(unit_uuid), indent=4
-                    )
-                    text += "```"
+    @staticmethod
+    def read_env(unit_uuid: uuid_pkg.UUID, chat_id: str) -> str:
+        with get_hand_session() as db:
+            env = get_bot_unit_service(db, None, chat_id).get_env(unit_uuid)
+        return json.dumps(env, ensure_ascii=False, indent=4)
 
-                case _ if decrees_type in (
-                    DecreesNames.TGZ,
-                    DecreesNames.TAR,
-                    DecreesNames.ZIP,
-                ):
-                    decrees_to_func = {
-                        DecreesNames.TGZ: unit_service.get_unit_firmware_tgz,
-                        DecreesNames.TAR: unit_service.get_unit_firmware_tar,
-                        DecreesNames.ZIP: unit_service.get_unit_firmware_zip,
-                    }
+    async def send_env(self, callback: types.CallbackQuery, env: str) -> None:
+        if self.text_length(env) <= self.body_budget(self.ENV_TITLE):
+            await self.respond(
+                callback, self.ENV_TITLE, body=env, send_new=True
+            )
+            return
+        document = BufferedInputFile(env.encode(), filename=self.ENV_FILENAME)
+        await callback.bot.send_document(
+            chat_id=self.chat_id(callback), document=document
+        )
+        await self.answer_callback(callback)
 
-                    unit = unit_service.get(unit_uuid)
-                    file_name = decrees_to_func[DecreesNames(decrees_type)](
-                        unit_uuid
-                    )
-                    await callback.message.answer_document(
-                        FSInputFile(
-                            file_name,
-                            filename=f"{unit.name}.{decrees_type.lower()}",
-                        )
-                    )
-
-                    os.remove(file_name)
-                    await callback.answer(parse_mode="Markdown")
-
-                    return
-
-                case _ if decrees_type in (
-                    BackendTopicCommand.UPDATE,
-                    BackendTopicCommand.SCHEMA_UPDATE,
-                    BackendTopicCommand.ENV_UPDATE,
-                    BackendTopicCommand.LOG_SYNC,
-                    BackendTopicCommand.RESET,
-                ):
-                    unit_io_service.command_to_input_base_topic(
-                        unit_uuid, BackendTopicCommand(decrees_type)
-                    )
-                    text = f"Success send command {decrees_type}"
-
-        await callback.answer(parse_mode="Markdown")
-        await self.telegram_response(callback, text, is_editable=False)
+    @staticmethod
+    def build_archive(
+        unit_uuid: uuid_pkg.UUID, chat_id: str, archive: DecreesNames
+    ) -> tuple[Path, str]:
+        with get_hand_session() as db:
+            service = get_bot_unit_service(db, None, chat_id)
+            unit = service.get(unit_uuid)
+            archive_methods = {
+                DecreesNames.TGZ: service.get_unit_firmware_tgz,
+                DecreesNames.TAR: service.get_unit_firmware_tar,
+                DecreesNames.ZIP: service.get_unit_firmware_zip,
+            }
+            path = Path(archive_methods[archive](unit_uuid))
+            return path, f"{unit.name}.{archive.value.lower()}"

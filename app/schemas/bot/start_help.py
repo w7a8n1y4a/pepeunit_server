@@ -1,88 +1,96 @@
-from aiogram import Router, types
-from aiogram.filters import Command
+from aiogram import types
+from aiogram.filters import Command, CommandObject
+from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from fastapi import HTTPException
 
-from app import settings
-from app.configs.clickhouse import get_hand_clickhouse_client
+from app import runtime, settings
 from app.configs.db import get_hand_session
 from app.configs.rest import get_bot_user_service
-from app.dto.enum import CommandNames, UserRole
-from app.repositories.user_repository import UserRepository
+from app.dto.enum import CommandNames
+from app.schemas.bot.telegram_menu import TelegramMenu
+from app.schemas.bot.telegram_router import TelegramRouter
 from app.schemas.bot.utils import make_monospace_table_with_title
 from app.schemas.pydantic.shared import Root
+from app.services.telegram_command_service import TelegramCommandSet
 
-base_router = Router()
 
+class StartHelpBotRouter(TelegramRouter):
+    COMMAND_TABLE_WIDTHS = [10, 38]
 
-@base_router.message(Command(CommandNames.START, CommandNames.HELP))
-async def start_help_resolver(message: types.Message):
-    args = message.text.split()
-    code = args[1] if len(args) == 2 else None
+    def __init__(self, menu: TelegramMenu) -> None:
+        super().__init__()
+        self.menu = menu
+        self.router.message(Command(CommandNames.START.value))(self.start)
+        self.router.message(Command(CommandNames.HELP.value))(self.show_help)
 
-    if code:
-        with get_hand_session() as db, get_hand_clickhouse_client() as cc:
-            user_repository = UserRepository(db)
-            user = user_repository.get_user_by_telegram_id(
-                str(message.chat.id)
+    async def start(
+        self,
+        message: types.Message,
+        state: FSMContext,
+        command: CommandObject,
+        telegram_commands: TelegramCommandSet,
+    ) -> None:
+        if not command.args:
+            await self.show_help(message, state, telegram_commands)
+            return
+
+        await state.clear()
+        if telegram_commands.is_blocked:
+            await self.respond(message, "Your Pepeunit account is blocked.")
+            return
+        if telegram_commands.role is not None:
+            await self.respond(
+                message,
+                "Telegram is already linked to this Pepeunit instance.",
+            )
+            return
+
+        chat_id = self.chat_id(message)
+        with get_hand_session() as db:
+            await get_bot_user_service(db, None, None).verification(
+                str(chat_id), command.args
             )
 
-            if user:
-                text = f"Your account is already linked to an account on instance {settings.pu_domain}"
-            else:
-                user_service = get_bot_user_service(db, cc, None)
-                try:
-                    await user_service.verification(str(message.chat.id), code)
-                    text = "Your Telegram is linked"
-                except HTTPException as e:
-                    if e.status_code == 422:
-                        text = "This Telegram account is already linked"
-                    else:
-                        text = "There is no such code"
+        await self.menu.refresh(state, chat_id)
+        await self.respond(
+            message, "Telegram is linked to your Pepeunit account."
+        )
 
-        await message.answer(text, parse_mode="Markdown")
-        return
+    async def show_help(
+        self,
+        message: types.Message,
+        state: FSMContext,
+        telegram_commands: TelegramCommandSet,
+    ) -> None:
+        await state.clear()
+        root = Root()
+        table = [["Command", "Description"]]
+        table.extend(
+            [f"/{command.command}", command.description]
+            for command in telegram_commands.commands
+        )
+        body = make_monospace_table_with_title(
+            table, lengths=self.COMMAND_TABLE_WIDTHS
+        )
+        if telegram_commands.is_blocked:
+            body += "\nYour Pepeunit account is blocked."
+        elif telegram_commands.role is None:
+            body += (
+                "\nOpen your Pepeunit profile to link your Telegram account."
+            )
 
-    root_data = Root()
+        builder = InlineKeyboardBuilder()
+        builder.row(
+            InlineKeyboardButton(text="Frontend", url=settings.pu_link),
+            InlineKeyboardButton(
+                text="Documentation", url="https://pepeunit.com"
+            ),
+        )
+        builder.button(text="Swagger", url=root.swagger)
+        if runtime.get().pu_ff_grafana_integration_enable:
+            builder.button(text="Grafana", url=root.grafana)
 
-    text = "\n```text\n"
-    table = [
-        ["Command", "Info"],
-        ["/info", "Instance metrics"],
-        ["/repo", "Information about repos"],
-        [
-            "/unit",
-            "Unit search, Unit base information, get env file, send mqtt command, get firmware archives, check IO nodes and check logs",
-        ],
-        ["/dashboard", "List of your Dashboards, links to Pepeunit"],
-        ["/peers", "List of known peers"],
-        ["/alerts", "Your alerts and the status of operations"],
-    ]
-    with get_hand_session() as db:
-        user = UserRepository(db).get_user_by_telegram_id(str(message.chat.id))
-        if user and user.role in {UserRole.ADMIN, UserRole.OWNER}:
-            table.append(["/control", "Admin global operations"])
-    text += make_monospace_table_with_title(
-        table, f"Backend Version - {root_data.version}", [10, 28]
-    )
-    text += "```"
-
-    buttons = [
-        InlineKeyboardButton(text="Frontend", url=settings.pu_link),
-        InlineKeyboardButton(text="Documentation", url="https://pepeunit.com"),
-    ]
-    builder = InlineKeyboardBuilder()
-
-    builder.add(*buttons)
-
-    buttons = [
-        InlineKeyboardButton(text="Swagger", url=root_data.swagger),
-        InlineKeyboardButton(text="Grafana", url=root_data.grafana),
-    ]
-
-    builder.row(*buttons)
-
-    await message.answer(
-        text, reply_markup=builder.as_markup(), parse_mode="Markdown"
-    )
+        await self.respond(
+            message, f"Pepeunit {root.version}", builder.as_markup(), body=body
+        )

@@ -313,6 +313,42 @@ class CommandNames(str, enum.Enum):
     CONTROL = "control"
 
 
+class TelegramCallback(enum.StrEnum):
+    NOOP = "noop"
+    PREV_PAGE = "prev_page"
+    NEXT_PAGE = "next_page"
+    BACK = "back"
+    SEARCH = "search"
+    CLEAR_SEARCH = "clear_search"
+    TOGGLE = "toggle"
+    ITEM = "uuid"
+    ACTION = "decres"
+    UNIT = "unit"
+    LOG = "log"
+
+
+class TelegramFilter(enum.StrEnum):
+    MINE = "mine"
+
+
+class TelegramStateKey(enum.StrEnum):
+    MENU = "telegram_commands"
+    VIEW = "telegram_view"
+    VERIFICATION_CODE = "telegram_link"
+
+
+class TelegramBotMode(str, enum.Enum):
+    WEBHOOK = "webhook"
+    POLLING = "pooling"
+
+
+class FrontendEntityPath(enum.StrEnum):
+    REPO = "repo"
+    UNIT = "unit"
+    UNIT_IO = "unit-node"
+    DASHBOARD = "dashboard"
+
+
 class EntityNames(str, enum.Enum):
     """
     Commands supported by the bot

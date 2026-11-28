@@ -1,263 +1,143 @@
-import contextlib
+import asyncio
 import json
-from json import JSONDecodeError
-from uuid import UUID
+import uuid as uuid_pkg
 
 from aiogram import F, types
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app import runtime, settings
-from app.configs.clickhouse import get_hand_clickhouse_client
 from app.configs.db import get_hand_session
-from app.configs.rest import get_bot_unit_io_service, get_bot_unit_service
+from app.configs.errors import CustomJSONDecodeError
+from app.configs.rest import get_bot_unit_service
+from app.domain.unit_io_model import UnitIO
 from app.dto.enum import (
     EntityNames,
+    FrontendEntityPath,
     JsonPayload,
+    TelegramCallback,
     UnitIOTypeEnum,
     VisibilityLevel,
 )
 from app.schemas.bot.base_bot_router import (
     BaseBotFilters,
     BaseBotRouter,
+    BotPage,
     UnitIOStates,
 )
-from app.schemas.bot.utils import make_monospace_table_with_title
+from app.schemas.bot.utils import (
+    format_datetime,
+    make_monospace_table_with_title,
+)
 from app.schemas.pydantic.unit_io import UnitIOFilter
 from app.services.validators import is_valid_json
 
 
-class UnitIOBotRouter(BaseBotRouter):
-    def __init__(self):
-        entity_name = EntityNames.UNIT_IO.value
-        super().__init__(entity_name=entity_name, states_group=UnitIOStates)
+class UnitIOBotRouter(BaseBotRouter[UnitIO]):
+    def __init__(self) -> None:
+        super().__init__(
+            EntityNames.UNIT_IO,
+            search_state=UnitIOStates.waiting_for_search,
+            from_unit=True,
+        )
         self.router.callback_query(
-            F.data.startswith(f"{self.entity_name}_unit_")
-        )(self.handle_by_unit)
+            F.data.startswith(self.callback_prefix(TelegramCallback.ITEM))
+        )(self.handle_entity_click)
 
-    async def handle_by_unit(
-        self, callback: types.CallbackQuery, state: FSMContext
-    ):
-        *_, unit_uuid = callback.data.split("_")
-
-        await state.set_state(None)
-        filters = BaseBotFilters(unit_uuid=unit_uuid)
-        await state.update_data(current_filters=filters)
-        await self.show_entities(callback, filters)
-
-    async def show_entities(
-        self,
-        message: types.Message | types.CallbackQuery,
-        filters: BaseBotFilters,
-    ):
-        chat_id = (
-            message.chat.id
-            if isinstance(message, types.Message)
-            else message.from_user.id
-        )
-
-        entities, total_pages = await self.get_entities_page(
-            filters, str(chat_id)
-        )
-        keyboard = self.build_entities_keyboard(entities, filters, total_pages)
-
-        text = "*UnitIOs*"
-        if filters.unit_uuid:
-            with get_hand_session() as db, get_hand_clickhouse_client() as cc:
-                unit_service = get_bot_unit_service(db, cc, str(chat_id))
-                unit = unit_service.get(filters.unit_uuid)
-
-            text += f" - for unit `{self.header_name_limit(unit.name)}`"
-
-        if filters.search_string:
-            text += f" - `{filters.search_string}`"
-
-        await self.telegram_response(message, text, keyboard)
-
-    async def get_entities_page(
+    def load_page(
         self, filters: BaseBotFilters, chat_id: str
-    ) -> tuple[list, int]:
-        with get_hand_session() as db, get_hand_clickhouse_client() as cc:
-            unit_io_service = get_bot_unit_io_service(db, cc, str(chat_id))
-
-            count, unit_ios = unit_io_service.list(
+    ) -> BotPage[UnitIO]:
+        with get_hand_session() as db:
+            unit_service = get_bot_unit_service(db, None, chat_id)
+            unit = unit_service.get(filters.unit_uuid)
+            count, unit_ios = unit_service.unit_io_service.list(
                 UnitIOFilter(
-                    offset=(filters.page - 1)
-                    * runtime.get().pu_telegram_items_per_page,
-                    limit=runtime.get().pu_telegram_items_per_page,
-                    visibility_level=filters.visibility_levels or [],
-                    type=filters.unit_types or [],
+                    offset=filters.offset,
+                    limit=filters.page_size,
+                    visibility_level=filters.visibility_levels,
+                    type=filters.unit_types,
                     search_string=filters.search_string,
-                    unit_uuid=filters.unit_uuid,
+                    unit_uuid=unit.uuid,
                 )
             )
-
-            total_pages = (
-                count + runtime.get().pu_telegram_items_per_page - 1
-            ) // runtime.get().pu_telegram_items_per_page
-
-        return unit_ios, total_pages
-
-    def build_entities_keyboard(
-        self, entities: list, filters: BaseBotFilters, total_pages: int
-    ) -> InlineKeyboardMarkup:
-        builder = InlineKeyboardBuilder()
-
-        filter_buttons = [
-            InlineKeyboardButton(
-                text="🔍 Search", callback_data=f"{self.entity_name}_search"
-            )
-        ]
-        builder.row(*filter_buttons)
-
-        filter_unit_types_buttons = [
-            InlineKeyboardButton(
-                text=("🟢 " if item.value in filters.unit_types else "🔴️ ")
-                + item.value,
-                callback_data=f"{self.entity_name}_toggle_" + item.value,
-            )
-            for item in UnitIOTypeEnum
-        ]
-        builder.row(*filter_unit_types_buttons)
-
-        filter_visibility_buttons = [
-            InlineKeyboardButton(
-                text=(
-                    "🟢 " if item.value in filters.visibility_levels else "🔴️ "
-                )
-                + item.value,
-                callback_data=f"{self.entity_name}_toggle_" + item.value,
-            )
-            for item in VisibilityLevel
-        ]
-        builder.row(*filter_visibility_buttons)
-        if entities:
-            for unit_io in entities:
-                builder.row(
-                    InlineKeyboardButton(
-                        text=f"{self.header_name_limit(unit_io.topic_name)} - {unit_io.type} - {unit_io.visibility_level}",
-                        callback_data=f"{self.entity_name}_uuid_{unit_io.uuid}_{filters.page}",
-                    )
-                )
-        else:
-            builder.row(
-                InlineKeyboardButton(text="No Data", callback_data="noop")
-            )
-
-        if total_pages > 1:
-            pagination_row = []
-            if filters.page > 1:
-                pagination_row.append(
-                    InlineKeyboardButton(
-                        text="⬅️", callback_data=f"{self.entity_name}_prev_page"
-                    )
-                )
-
-            pagination_row.append(
-                InlineKeyboardButton(
-                    text=f"{filters.page}/{total_pages}", callback_data="noop"
-                )
-            )
-
-            if filters.page < total_pages:
-                pagination_row.append(
-                    InlineKeyboardButton(
-                        text="➡️", callback_data=f"{self.entity_name}_next_page"
-                    )
-                )
-            builder.row(*pagination_row)
-
-        builder.row(
-            InlineKeyboardButton(
-                text="← Back",
-                callback_data=f"{EntityNames.UNIT.value}_uuid_{filters.unit_uuid}_{filters.page}",
-            )
+        return BotPage(
+            count, unit_ios, f"Unit IO · {self.header_name_limit(unit.name)}"
         )
 
-        return builder.as_markup()
+    def build_list_keyboard(
+        self, items: list[UnitIO], filters: BaseBotFilters
+    ) -> InlineKeyboardBuilder:
+        builder = InlineKeyboardBuilder()
+        self.add_search(builder, filters)
+        self.add_choices(builder, UnitIOTypeEnum, filters.unit_types)
+        self.add_choices(builder, VisibilityLevel, filters.visibility_levels)
+        for unit_io in items:
+            name = self.header_name_limit(unit_io.topic_name)
+            builder.row(
+                self.item_button(
+                    f"{name} · {unit_io.type} · {unit_io.visibility_level}",
+                    unit_io.uuid,
+                    filters.page,
+                )
+            )
+        return builder
+
+    @staticmethod
+    def get_unit_io(unit_io_uuid: uuid_pkg.UUID, chat_id: str) -> UnitIO:
+        with get_hand_session() as db:
+            return get_bot_unit_service(db, None, chat_id).unit_io_service.get(
+                unit_io_uuid
+            )
 
     async def handle_entity_click(
         self, callback: types.CallbackQuery, state: FSMContext
     ) -> None:
-        data = await state.get_data()
-        filters: BaseBotFilters = (
-            BaseBotFilters(**data.get("current_filters"))
-            if data.get("current_filters")
-            else BaseBotFilters()
+        unit_io_uuid, page = self.item_selection(callback)
+        unit_io = await asyncio.to_thread(
+            self.get_unit_io, unit_io_uuid, str(self.chat_id(callback))
         )
-
-        unit_io_uuid = UUID(callback.data.split("_")[-2])
-        current_page = int(callback.data.split("_")[-1])
-
-        if not filters.previous_filters:
-            filters.page = current_page
-            new_filters = BaseBotFilters(previous_filters=filters)
-            await state.update_data(current_filters=new_filters)
-
-        with get_hand_session() as db, get_hand_clickhouse_client() as cc:
-            unit_io_service = get_bot_unit_io_service(
-                db, cc, str(callback.from_user.id)
-            )
-            unit_io = unit_io_service.get(unit_io_uuid)
-
-        text = f"*UnitIO* - `{self.header_name_limit(unit_io.topic_name)}`"
-
-        text += "\n```text\n"
-
+        filters = await self.detail_filters(
+            state, callback.message.message_id, page, unit_io.unit_uuid
+        )
         table = [
             ["Type", unit_io.type],
             ["Visibility", unit_io.visibility_level],
-            [
-                "Last Update",
-                unit_io.last_update_datetime.strftime("%Y-%m-%d %H:%M:%S"),
-            ],
+            ["Last update", format_datetime(unit_io.last_update_datetime)],
         ]
-
         if unit_io.type == UnitIOTypeEnum.INPUT:
-            table.append(["Rewritable?", unit_io.is_rewritable_input])
+            table.append(["Rewritable", unit_io.is_rewritable_input])
+        if unit_io.last_message_error:
+            table.append(["Last error", unit_io.last_message_error])
 
-        text += make_monospace_table_with_title(table, "Base Info")
+        body = make_monospace_table_with_title(
+            table, "Unit IO", lengths=[15, 38]
+        )
+        if unit_io.state is not None:
+            body += f"\nState\n{self.state_text(unit_io.state)}"
 
-        if unit_io.state:
-            text += "\nState:\n\n"
-
-            try:
-                unit_state = is_valid_json(
-                    unit_io.state, JsonPayload.UNIT_IO_STATE
-                )
-                text += json.dumps(unit_state, indent=4)
-
-            except JSONDecodeError:
-                text += unit_io.state
-
-        text += "```"
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    text="← Back", callback_data=f"{self.entity_name}_back"
-                ),
-                InlineKeyboardButton(
-                    text="↻ Refresh",
-                    callback_data=f"{self.entity_name}_uuid_{unit_io.uuid}_{filters.page}",
-                ),
-                InlineKeyboardButton(
-                    text="Browser",
-                    url=f"{settings.pu_link}/unit-io/{unit_io.uuid}",
-                ),
-            ],
-        ]
-
-        await callback.answer(parse_mode="Markdown")
-
-        with contextlib.suppress(TelegramBadRequest):
-            await self.telegram_response(
-                callback, text, InlineKeyboardMarkup(inline_keyboard=keyboard)
+        builder = InlineKeyboardBuilder()
+        builder.row(
+            *self.detail_buttons(
+                unit_io.uuid,
+                filters.page,
+                self.browser_url(FrontendEntityPath.UNIT_IO, unit_io.uuid),
             )
+        )
+        await self.show_detail(
+            callback,
+            state,
+            filters,
+            self.header_name_limit(unit_io.topic_name),
+            builder,
+            body=body,
+        )
 
-    async def handle_entity_decrees(
-        self, callback: types.CallbackQuery
-    ) -> None:
-        await callback.answer(parse_mode="Markdown")
+    @staticmethod
+    def state_text(state: str) -> str:
+        try:
+            return json.dumps(
+                is_valid_json(state, JsonPayload.UNIT_IO_STATE),
+                ensure_ascii=False,
+                indent=2,
+            )
+        except CustomJSONDecodeError:
+            return state

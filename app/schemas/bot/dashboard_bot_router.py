@@ -1,137 +1,55 @@
-from aiogram import types
-from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app import runtime, settings
 from app.configs.clickhouse import get_hand_clickhouse_client
 from app.configs.db import get_hand_session
 from app.configs.rest import get_bot_grafana_service
-from app.dto.enum import CommandNames, EntityNames
+from app.domain.dashboard_model import Dashboard
+from app.dto.enum import CommandNames, EntityNames, FrontendEntityPath
 from app.schemas.bot.base_bot_router import (
     BaseBotFilters,
     BaseBotRouter,
+    BotPage,
     DashboardStates,
 )
 from app.schemas.pydantic.grafana import DashboardFilter
 
 
-class DashboardBotRouter(BaseBotRouter):
-    def __init__(self):
-        entity_name = EntityNames.DASHBOARD.value
-        super().__init__(entity_name=entity_name, states_group=DashboardStates)
-        self.router.message(Command(CommandNames.DASHBOARD))(
-            self.dashboard_resolver
+class DashboardBotRouter(BaseBotRouter[Dashboard]):
+    def __init__(self) -> None:
+        super().__init__(
+            EntityNames.DASHBOARD,
+            CommandNames.DASHBOARD,
+            search_state=DashboardStates.waiting_for_search,
         )
 
-    async def dashboard_resolver(
-        self, message: types.Message, state: FSMContext
-    ):
-        await state.set_state(None)
-        filters = BaseBotFilters()
-        await state.update_data(current_filters=filters)
-        await self.show_entities(message, filters)
-
-    async def show_entities(
-        self,
-        message: types.Message | types.CallbackQuery,
-        filters: BaseBotFilters,
-    ):
-        chat_id = (
-            message.chat.id
-            if isinstance(message, types.Message)
-            else message.from_user.id
-        )
-
-        entities, total_pages = await self.get_entities_page(
-            filters, str(chat_id)
-        )
-        keyboard = self.build_entities_keyboard(entities, filters, total_pages)
-
-        text = "*Dashboards*"
-        if filters.search_string:
-            text += f" - `{filters.search_string}`"
-
-        await self.telegram_response(message, text, keyboard)
-
-    async def get_entities_page(
+    def load_page(
         self, filters: BaseBotFilters, chat_id: str
-    ) -> tuple[list, int]:
+    ) -> BotPage[Dashboard]:
         with get_hand_session() as db, get_hand_clickhouse_client() as cc:
-            grafana_service = get_bot_grafana_service(db, cc, str(chat_id))
-
-            count, dashboards = grafana_service.list_dashboards(
+            count, dashboards = get_bot_grafana_service(
+                db, cc, chat_id
+            ).list_dashboards(
                 DashboardFilter(
-                    offset=(filters.page - 1)
-                    * runtime.get().pu_telegram_items_per_page,
-                    limit=runtime.get().pu_telegram_items_per_page,
+                    offset=filters.offset,
+                    limit=filters.page_size,
                     search_string=filters.search_string,
                 )
             )
+        return BotPage(count, dashboards, "Dashboards")
 
-            total_pages = (
-                count + runtime.get().pu_telegram_items_per_page - 1
-            ) // runtime.get().pu_telegram_items_per_page
-
-        return dashboards, total_pages
-
-    def build_entities_keyboard(
-        self, entities: list, filters: BaseBotFilters, total_pages: int
-    ) -> InlineKeyboardMarkup:
+    def build_list_keyboard(
+        self, items: list[Dashboard], filters: BaseBotFilters
+    ) -> InlineKeyboardBuilder:
         builder = InlineKeyboardBuilder()
-
-        filter_buttons = [
-            InlineKeyboardButton(
-                text="🔍 Search", callback_data=f"{self.entity_name}_search"
-            ),
-        ]
-        builder.row(*filter_buttons)
-
-        if entities:
-            for dashboard in entities:
-                builder.row(
-                    InlineKeyboardButton(
-                        text=f"{self.repo_name_limit(dashboard.name, 2)}",
-                        url=f"{settings.pu_link}/dashboard/{dashboard.uuid}",
-                    )
-                )
-        else:
+        self.add_search(builder, filters)
+        for dashboard in items:
             builder.row(
-                InlineKeyboardButton(text="No Data", callback_data="noop")
-            )
-
-        if total_pages > 1:
-            pagination_row = []
-            if filters.page > 1:
-                pagination_row.append(
-                    InlineKeyboardButton(
-                        text="⬅️", callback_data=f"{self.entity_name}_prev_page"
-                    )
-                )
-
-            pagination_row.append(
                 InlineKeyboardButton(
-                    text=f"{filters.page}/{total_pages}", callback_data="noop"
+                    text=self.header_name_limit(dashboard.name),
+                    url=self.browser_url(
+                        FrontendEntityPath.DASHBOARD, dashboard.uuid
+                    ),
                 )
             )
-
-            if filters.page < total_pages:
-                pagination_row.append(
-                    InlineKeyboardButton(
-                        text="➡️", callback_data=f"{self.entity_name}_next_page"
-                    )
-                )
-            builder.row(*pagination_row)
-
-        return builder.as_markup()
-
-    async def handle_entity_click(
-        self, callback: types.CallbackQuery, state: FSMContext
-    ) -> None:
-        pass
-
-    async def handle_entity_decrees(
-        self, callback: types.CallbackQuery
-    ) -> None:
-        pass
+        return builder

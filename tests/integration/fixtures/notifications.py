@@ -4,23 +4,16 @@ import pytest
 
 from app.domain.notification_model import Notification
 from app.domain.user_model import User
-from app.dto.enum import OperationTaskType
 from app.repositories.user_repository import UserRepository
 from app.schemas.pydantic.notification import NotificationSettingsUpdate
-from app.schemas.pydantic.operation_task import OperationTaskCreate
 from app.services.notification_service import NotificationService
 from tests.integration.helpers.notifications import (
     as_recipient,
-    drop_notification,
-    latest_notification,
-    process_saved,
+    drop_notifications,
+    wait_for_task_alerts,
 )
 from tests.integration.helpers.owner import as_owner
-from tests.integration.helpers.services import (
-    notification_service,
-    operation_task_service,
-)
-from tests.integration.helpers.tasks import drop_task
+from tests.integration.helpers.services import notification_service
 
 
 @pytest.fixture
@@ -49,18 +42,12 @@ def recipient_service(
         yield service
 
 
-@pytest.fixture
-def crud_notification(
-    regular_user, regular_user_token, database, cc
-) -> Notification:
-    """The alert OperationTaskService writes when a task is created."""
-    task = operation_task_service(database, regular_user_token).create(
-        OperationTaskCreate(task_type=OperationTaskType.UPDATE_REPO)
-    )
+@pytest.fixture(scope="session")
+def repo_task_alerts(
+    repo_sync_task, regular_user_token, database, cc
+) -> Iterator[tuple[Notification, Notification]]:
+    _, task = repo_sync_task
     service = notification_service(database, cc, regular_user_token)
-    pending = latest_notification(database, regular_user.uuid)
-    process_saved(service, [pending])
-    stored = service.get(pending.uuid)
-    yield stored
-    drop_notification(database, stored.uuid)
-    drop_task(database, task.uuid)
+    alerts = wait_for_task_alerts(service, task)
+    yield alerts
+    drop_notifications(database, alerts)

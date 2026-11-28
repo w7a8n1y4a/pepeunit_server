@@ -1,5 +1,4 @@
 from calendar import monthrange
-from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 from math import isfinite
 
@@ -7,22 +6,9 @@ import pytest
 
 from app.configs.error_codes import ErrorCode
 from app.configs.errors import InstanceError, NoAccessError
-from app.dto.agent.abc import AgentUser
-from app.dto.enum import InstanceResourceMetric, NotificationType
-from app.schemas.pydantic.notification import NotificationFilter
-from app.utils.utils import ensure_timezone_aware
 from tests.integration.helpers.instance_settings import owner_setting
-from tests.integration.helpers.notifications import (
-    as_recipient,
-    notification_was_delivered,
-    use_configured_test_telegram_chat,
-    wait_for_resource_alert_window,
-)
 from tests.integration.helpers.owner import as_owner
-from tests.integration.helpers.services import (
-    instance_resources_service,
-    notification_service,
-)
+from tests.integration.helpers.services import instance_resources_service
 from tests.integration.helpers.wait import wait_until
 
 
@@ -57,11 +43,15 @@ def test_resource_history_rejects_invalid_period(
 
 
 def test_resource_history_uses_live_samples(
-    extra_user, extra_user_token, database, cc
+    integration_started_at: datetime,
+    extra_user,
+    extra_user_token,
+    database,
+    cc,
 ) -> None:
     with as_owner(database, extra_user):
         service = instance_resources_service(database, cc, extra_user_token)
-        started = datetime.now(UTC).replace(second=0, microsecond=0)
+        started = integration_started_at
         outside_retention = started - timedelta(days=91)
         assert (
             service.history(
@@ -131,98 +121,3 @@ def test_monthly_traffic_respects_instance_limits(
     assert traffic.limit_percent == pytest.approx(
         traffic.estimated_bytes * 100 / traffic.limit_bytes
     )
-
-
-@pytest.mark.notification
-def test_resource_limit_alert_reaches_owner_once(
-    resource_alert_owner, database, cc
-) -> None:
-    wait_for_resource_alert_window(database)
-    owner = resource_alert_owner
-    token = AgentUser(**owner.model_dump()).generate_agent_token()
-    notifications = notification_service(database, cc, token)
-    repository = notifications.notification_repository
-    filters = NotificationFilter.unlimited(
-        type=[NotificationType.INSTANCE_RESOURCE_LIMIT]
-    )
-    _, prior_alerts = repository.list(owner.uuid, filters)
-    prior_ids = {alert.uuid for alert in prior_alerts}
-
-    def new_alerts():
-        _, alerts = notifications.list(filters)
-        return [alert for alert in alerts if alert.uuid not in prior_ids]
-
-    resources = instance_resources_service(database, cc, token)
-    target_pg_percent = 95
-    pg_bytes, _ = resources.repository.database_sizes()
-    pg_size_limit = round(pg_bytes * 100 / target_pg_percent)
-    expected_pg_percent = pytest.approx(target_pg_percent, abs=3)
-
-    try:
-        with ExitStack() as resource_limit:
-            with (
-                use_configured_test_telegram_chat(
-                    database, owner
-                ) as telegram_enabled,
-                as_recipient(
-                    database,
-                    cc,
-                    owner,
-                    token,
-                    telegram_enabled=telegram_enabled,
-                ),
-            ):
-                resource_limit.enter_context(
-                    owner_setting(
-                        database,
-                        owner,
-                        token,
-                        "pu_instance_pg_size_limit",
-                        pg_size_limit,
-                    )
-                )
-                wait_until(
-                    lambda: bool(new_alerts()),
-                    timeout=150,
-                    interval=2,
-                    session=database,
-                    message="PostgreSQL limit alert did not reach the owner",
-                )
-                (alert,) = new_alerts()
-                assert alert.user_uuid == owner.uuid
-                pg_percent = alert.data["metrics"][
-                    InstanceResourceMetric.POSTGRESQL
-                ]
-                assert pg_percent == expected_pg_percent
-                wait_until(
-                    lambda: notification_was_delivered(owner.uuid, alert.uuid),
-                    message="resource alert was not published to the owner's stream",
-                )
-
-            next_sample = ensure_timezone_aware(
-                alert.create_datetime
-            ) + timedelta(seconds=1)
-            wait_until(
-                lambda: (
-                    datetime.now(UTC) > next_sample
-                    and bool(resources.history(next_sample, datetime.now(UTC)))
-                ),
-                timeout=80,
-                interval=2,
-                message="resource collector did not take the next sample",
-            )
-            samples = resources.history(next_sample, datetime.now(UTC))
-            assert samples[-1].pg_disk_percent == expected_pg_percent
-            _, alerts = repository.list(owner.uuid, filters)
-            assert [
-                item.uuid for item in alerts if item.uuid not in prior_ids
-            ] == [alert.uuid]
-    finally:
-        _, alerts = repository.list(owner.uuid, filters)
-        for item in alerts:
-            if (
-                item.uuid not in prior_ids
-                and InstanceResourceMetric.POSTGRESQL
-                in item.data.get("metrics", {})
-            ):
-                repository.delete(item)

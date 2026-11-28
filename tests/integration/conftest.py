@@ -5,6 +5,7 @@ import time
 import tomllib
 import uuid as uuid_pkg
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from importlib.metadata import distribution
 from pathlib import Path
 
@@ -42,6 +43,11 @@ def database() -> Session:
 @pytest.fixture(scope="session")
 def cc() -> Client:
     return next(get_clickhouse_client())
+
+
+@pytest.fixture(scope="session", autouse=True)
+def integration_started_at() -> datetime:
+    return datetime.now(UTC)
 
 
 @pytest.fixture(scope="session")

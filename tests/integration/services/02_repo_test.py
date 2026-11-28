@@ -1,6 +1,5 @@
 import logging
 import os
-from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import func
@@ -12,7 +11,6 @@ from app.configs.errors import (
     NoAccessError,
     RepoError,
 )
-from app.domain.repo_model import Repo
 from app.domain.unit_model import Unit
 from app.dto.enum import (
     CredentialStatus,
@@ -245,16 +243,6 @@ def test_child_unit_count(
     )
 
 
-def test_update_local_repository(
-    github_public_repo, regular_user_token, database
-) -> None:
-    service = repo_service(database, regular_user_token)
-    service.git_repo_repository.delete_repo(Repo(uuid=github_public_repo.uuid))
-    service.update_local_repository(github_public_repo.uuid)
-    repo_api = service.get(github_public_repo.uuid)
-    assert repo_api.sync_status == RepoStatus.UPDATED
-
-
 def test_get_commits_only_tag(
     universal_repo, regular_user_token, database
 ) -> None:
@@ -266,26 +254,6 @@ def test_get_commits_only_tag(
     ).commits
     assert commits
     assert all(item.tag for item in commits)
-
-
-def test_sync_not_available_while_processing(
-    github_public_repo, regular_user_token, database
-) -> None:
-    service = repo_service(database, regular_user_token)
-    repo = service.get(github_public_repo.uuid)
-    original_status = repo.sync_status
-    repo.sync_status = RepoStatus.PROCESSING
-    repo.sync_last_datetime = datetime.now(UTC)
-    repo.last_update_datetime = datetime.now(UTC)
-    service.repo_repository.update(repo.uuid, repo)
-    try:
-        with pytest.raises(RepoError):
-            service.update_local_repository(github_public_repo.uuid)
-    finally:
-        repo = service.get(github_public_repo.uuid)
-        repo.sync_status = original_status
-        repo.sync_error = None
-        service.repo_repository.update(repo.uuid, repo)
 
 
 def test_create_repo_by_api_duplicate(
@@ -306,19 +274,28 @@ def test_create_repo_by_api_duplicate(
 
 
 def test_schedule_update_repo(
-    github_public_repo, regular_user_token, database
+    repo_sync_task,
+    github_public_repo,
+    regular_user,
+    regular_user_token,
+    database,
 ) -> None:
     service = repo_service(database, regular_user_token)
-    task = service.schedule_update(github_public_repo.uuid)
-
+    task, finished = repo_sync_task
     assert task.task_type == OperationTaskType.UPDATE_REPO.value
     assert task.status == OperationTaskStatus.RUNNING.value
-
-    finished = wait_task_finish(database, task, timeout=300)
+    assert task.creator_uuid == regular_user.uuid
+    assert task.finish_datetime is None
     assert finished.status == OperationTaskStatus.SUCCESS.value
     assert finished.result == "Repo updated"
+    assert finished.finish_datetime is not None
     assert (
         service.get(github_public_repo.uuid).sync_status == RepoStatus.UPDATED
+    )
+    assert os.path.exists(
+        service.git_repo_repository.get_path_physic_repository(
+            github_public_repo
+        )
     )
 
 

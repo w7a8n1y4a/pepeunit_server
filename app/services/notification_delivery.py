@@ -212,6 +212,7 @@ class NotificationDelivery:
     STREAM_PREFIX = "notification_user:"
     # SSE field that carries the public notification JSON
     EVENT = "data"
+    INITIAL_STREAM_ID = "0-0"
     READ_COUNT = 20
     READ_BLOCK_MS = 5_000
     # Redis must outlive the blocking read, otherwise xread returns empty
@@ -284,8 +285,9 @@ class NotificationDelivery:
         )
         try:
             redis = await anext(session)
-            last_id = "$"
             stream = self.stream_name(user_uuid)
+            recent = await redis.xrevrange(stream, count=1)
+            last_id = recent[0][0] if recent else self.INITIAL_STREAM_ID
             yield ": connected\n\n"
             while not await request.is_disconnected():
                 response = await redis.xread(

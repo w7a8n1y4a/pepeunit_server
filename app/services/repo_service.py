@@ -590,11 +590,9 @@ class RepoService:
             repo.sync_status == RepoStatus.PROCESSING
             and repo.sync_last_datetime
         ):
-            last_update_datetime = ensure_timezone_aware(
-                repo.last_update_datetime
-            )
+            sync_started_at = ensure_timezone_aware(repo.sync_last_datetime)
 
-            delta = (datetime.now(UTC) - last_update_datetime).total_seconds()
+            delta = (datetime.now(UTC) - sync_started_at).total_seconds()
             if delta <= runtime.get().pu_instance_repo_min_interval_sync:
                 msg = f"Sync is not available, last sync was {delta} s ago, but it should have taken at least {runtime.get().pu_instance_repo_min_interval_sync} s"
                 raise RepoError(msg, code=ErrorCode.REPO_SYNC_TOO_SOON)

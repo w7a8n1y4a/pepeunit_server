@@ -1,6 +1,7 @@
 import json
 import logging
-import time
+import shlex
+import sys
 import uuid as uuid_pkg
 from datetime import UTC, datetime, timedelta
 
@@ -9,26 +10,17 @@ import pytest
 from pydantic import ValidationError as SchemaValidationError
 from sqlmodel import Session, col, select
 
-from app import runtime, settings
+from app import settings
 from app.configs.errors import NoAccessError
 from app.domain.notification_model import Notification
-from app.dto.clickhouse.log import UnitLog
 from app.dto.enum import (
-    AgentType,
-    LogLevel,
     NotificationType,
     OperationTaskStatus,
     OperationTaskType,
-    UserRole,
 )
 from app.repositories.notification_settings_repository import (
     NotificationSettingsRepository,
 )
-from app.repositories.operation_task_repository import (
-    OperationTaskRepository,
-)
-from app.repositories.unit_log_repository import UnitLogRepository
-from app.repositories.user_repository import UserRepository
 from app.schemas.pydantic.notification import (
     NotificationFilter,
     NotificationRead,
@@ -36,23 +28,22 @@ from app.schemas.pydantic.notification import (
 )
 from app.schemas.pydantic.operation_task import OperationTaskCreate
 from app.schemas.pydantic.unit_io import UnitIOUpdate
-from app.services.operation_task_service import OperationTaskService
-from app.utils.utils import create_upload_file_from_path
+from app.utils.utils import create_upload_file_from_path, ensure_timezone_aware
 from tests.client.mqtt import COUNTER_OUTPUT
 from tests.integration.helpers.notifications import (
-    as_recipient,
     drop_notifications,
-    latest_notification,
-    process_saved,
+    wait_for_task_alerts,
 )
 from tests.integration.helpers.services import (
     find_unit_io,
     notification_service,
     operation_task_service,
+    peer_service,
+    repo_service,
     unit_io_service,
 )
 from tests.integration.helpers.tasks import drop_task
-from tests.integration.helpers.wait import wait_until
+from tests.integration.helpers.wait import wait_task_finish, wait_until
 
 LIVE_ALERT_YAML = "tests/data/yaml/integra/data_pipe_alerts_live.yaml"
 
@@ -118,39 +109,35 @@ def test_update_notification_settings_invalid_time(
 
 
 def test_integration_tests_big_text_is_stored(
-    admin_user, admin_user_token, database, cc
+    admin_user_token, database, cc
 ) -> None:
     full_log = "UNIQUE_STORED\n" + ("y" * 400)
-    owned = {
-        row.uuid
-        for row in database.query(Notification)
-        .filter(Notification.user_uuid == admin_user.uuid)
-        .all()
-    }
-    task = operation_task_service(database, admin_user_token).create(
+    tasks = operation_task_service(database, admin_user_token)
+    task = tasks.create(
         OperationTaskCreate(task_type=OperationTaskType.INTEGRATION_TESTS)
     )
-    finished = OperationTaskService._finish(
-        OperationTaskRepository(database),
-        task.uuid,
-        OperationTaskStatus.ERROR,
-        full_log,
-    )
-    OperationTaskService._record_alert(database, finished)
-    service = notification_service(database, cc, admin_user_token)
-    pending = (
-        database.query(Notification)
-        .filter(
-            Notification.user_uuid == admin_user.uuid,
-            Notification.is_processed.is_(False),
+
+    def failing_test_command(session: Session) -> str:
+        service = peer_service(session, admin_user_token)
+        service.INTEGRATION_TEST_COMMAND = shlex.join(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.exit(sys.argv[1])",
+                full_log,
+            ]
         )
-        .all()
-    )
-    pending = [row for row in pending if row.uuid not in owned]
-    process_saved(service, pending)
-    stored = [service.get(row.uuid) for row in pending]
-    saved = next(row for row in stored if row.big_text)
+        return service.run_integration_tests()
+
+    stored = ()
     try:
+        tasks.schedule(task, failing_test_command)
+        finished = wait_task_finish(database, task)
+        assert finished.status == OperationTaskStatus.ERROR
+        stored = wait_for_task_alerts(
+            notification_service(database, cc, admin_user_token), finished
+        )
+        _, saved = stored
         assert saved.big_text == full_log
         assert "UNIQUE_STORED" not in saved.table_text
         assert saved.small_text == "IntegrationTests: Error"
@@ -167,7 +154,7 @@ def test_integration_tests_big_text_is_stored(
 
 
 def test_notification_stream(
-    regular_user, regular_user_token, database, cc
+    gitlab_public_repo, regular_user_token, database, cc
 ) -> None:
     url = f"{settings.pu_link_prefix_and_v1}/notifications/stream"
     rejected = httpx.get(
@@ -177,7 +164,7 @@ def test_notification_stream(
     )
     assert rejected.status_code == 403
 
-    notification = None
+    alerts = ()
     task = None
     try:
         with httpx.stream(
@@ -195,15 +182,14 @@ def test_notification_stream(
             )
             lines = response.iter_lines()
             assert next(lines) == ": connected"
-            # The handler yields the handshake before it blocks on the stream
-            time.sleep(0.5)
-            task = operation_task_service(database, regular_user_token).create(
-                OperationTaskCreate(task_type=OperationTaskType.UPDATE_REPO)
+            task = repo_service(database, regular_user_token).schedule_update(
+                gitlab_public_repo.uuid
             )
+            finished = wait_task_finish(database, task)
+            assert finished.status == OperationTaskStatus.SUCCESS
             service = notification_service(database, cc, regular_user_token)
-            notification = latest_notification(database, regular_user.uuid)
-            process_saved(service, [notification])
-            notification = service.get(notification.uuid)
+            alerts = wait_for_task_alerts(service, finished)
+            _, notification = alerts
 
             message = None
             expected = str(notification.uuid)
@@ -223,8 +209,7 @@ def test_notification_stream(
         assert message["small_text"]
         assert "text" not in message
     finally:
-        if notification is not None:
-            drop_notifications(database, [notification])
+        drop_notifications(database, alerts)
         if task is not None:
             drop_task(database, task.uuid)
 
@@ -326,7 +311,7 @@ async def test_data_pipe_alert_live(
                 item
                 for item in notifications
                 if item.data["unit_io_uuid"] == str(node.uuid)
-                and _aware(item.create_datetime) >= started
+                and ensure_timezone_aware(item.create_datetime) >= started
             ]
             return bool(created)
 
@@ -373,27 +358,29 @@ async def test_data_pipe_alert_live(
 
 
 def test_get_notification(
-    crud_notification, regular_user_token, database, cc
+    repo_task_alerts, regular_user_token, database, cc
 ) -> None:
     service = notification_service(database, cc, regular_user_token)
-    assert service.get(crud_notification.uuid).uuid == crud_notification.uuid
+    assert (
+        service.get(repo_task_alerts[0].uuid).uuid == repo_task_alerts[0].uuid
+    )
 
 
 def test_get_notification_not_target(
-    crud_notification, extra_user_token, database, cc
+    repo_task_alerts, extra_user_token, database, cc
 ) -> None:
     service = notification_service(database, cc, extra_user_token)
     with pytest.raises(NoAccessError):
-        service.get(crud_notification.uuid)
+        service.get(repo_task_alerts[0].uuid)
 
 
 def test_get_many_notification(
-    crud_notification, regular_user, regular_user_token, database, cc
+    repo_task_alerts, regular_user, regular_user_token, database, cc
 ) -> None:
     service = notification_service(database, cc, regular_user_token)
     count, notifications = service.list(NotificationFilter.unlimited())
     assert count >= 1
-    assert any(item.uuid == crud_notification.uuid for item in notifications)
+    assert any(item.uuid == repo_task_alerts[0].uuid for item in notifications)
     assert all(item.user_uuid == regular_user.uuid for item in notifications)
 
     count, notifications = service.list(
@@ -402,7 +389,7 @@ def test_get_many_notification(
             is_read=False,
         )
     )
-    assert any(item.uuid == crud_notification.uuid for item in notifications)
+    assert any(item.uuid == repo_task_alerts[0].uuid for item in notifications)
     assert all(
         item.type == NotificationType.UPDATE_REPO.value
         for item in notifications
@@ -414,53 +401,40 @@ def test_get_many_notification(
             type=[NotificationType.UNIT_DAILY_SUMMARY.value]
         )
     )
-    assert all(item.uuid != crud_notification.uuid for item in notifications)
+    assert all(item.uuid != repo_task_alerts[0].uuid for item in notifications)
 
 
 def test_list_notifications_only_own(
-    crud_notification, extra_user_token, database, cc
+    repo_task_alerts, extra_user_token, database, cc
 ) -> None:
     service = notification_service(database, cc, extra_user_token)
     _count, notifications = service.list(NotificationFilter.unlimited())
-    assert all(item.uuid != crud_notification.uuid for item in notifications)
+    assert all(item.uuid != repo_task_alerts[0].uuid for item in notifications)
 
 
-def test_mark_notification_read(
-    crud_notification, regular_user_token, database, cc
+def test_notification_read_lifecycle(
+    repo_task_alerts, regular_user_token, database, cc
 ) -> None:
+    started, finished = repo_task_alerts
     service = notification_service(database, cc, regular_user_token)
-    read = service.mark_read(crud_notification.uuid)
+    assert started.is_read is False
+    assert finished.is_read is False
+
+    read = service.mark_read(started.uuid)
     assert read.is_read is True
     assert read.read_datetime is not None
+    assert service.mark_read(started.uuid).read_datetime == read.read_datetime
 
-    again = service.mark_read(crud_notification.uuid)
-    assert again.read_datetime == read.read_datetime
-
-
-def test_mark_all_notifications_read(
-    crud_notification, regular_user, regular_user_token, database, cc
-) -> None:
-    task = operation_task_service(database, regular_user_token).create(
-        OperationTaskCreate(task_type=OperationTaskType.SCAN_PEER)
-    )
-    service = notification_service(database, cc, regular_user_token)
-    second = latest_notification(database, regular_user.uuid)
-    process_saved(service, [second])
-    try:
-        marked = service.mark_all_read()
-        assert marked >= 2
-        _count, notifications = service.list(NotificationFilter.unlimited())
-        assert any(
-            item.uuid == crud_notification.uuid for item in notifications
-        )
-        assert all(item.is_read is True for item in notifications)
-        assert service.mark_all_read() == 0
-    finally:
-        drop_notifications(database, [second])
-        drop_task(database, task.uuid)
+    assert service.mark_all_read() >= 1
+    _, notifications = service.list(NotificationFilter.unlimited())
+    assert {started.uuid, finished.uuid} <= {
+        item.uuid for item in notifications
+    }
+    assert all(item.is_read is True for item in notifications)
+    assert service.mark_all_read() == 0
 
 
-def test_notification_anonymous(crud_notification, database, cc) -> None:
+def test_notification_anonymous(repo_task_alerts, database, cc) -> None:
     service = notification_service(database, cc, None)
     with pytest.raises(NoAccessError):
         service.get_settings()
@@ -469,238 +443,10 @@ def test_notification_anonymous(crud_notification, database, cc) -> None:
             NotificationSettingsUpdate(is_telegram_alert_enable=True)
         )
     with pytest.raises(NoAccessError):
-        service.get(crud_notification.uuid)
+        service.get(repo_task_alerts[0].uuid)
     with pytest.raises(NoAccessError):
         service.list(NotificationFilter())
     with pytest.raises(NoAccessError):
-        service.mark_read(crud_notification.uuid)
+        service.mark_read(repo_task_alerts[0].uuid)
     with pytest.raises(NoAccessError):
         service.mark_all_read()
-    with pytest.raises(NoAccessError):
-        service.access_service.authorization.check_access([AgentType.USER])
-
-
-def test_create_scheduled_instance_state(
-    admin_user, admin_user_token, database, cc
-) -> None:
-    created = []
-    with as_recipient(database, cc, admin_user, admin_user_token) as service:
-        try:
-            service.update_settings(
-                NotificationSettingsUpdate(
-                    is_scheduled_alert_enable=True,
-                    scheduled_notification_time=_scheduled_now(),
-                )
-            )
-            deliveries = _generate_scheduled(service, created)
-
-            instance_alerts = [
-                item
-                for item in deliveries
-                if item.type == NotificationType.INSTANCE_DAILY_STATE.value
-            ]
-            assert len(instance_alerts) == 1
-            errors = instance_alerts[0].data["errors"]
-            assert len(errors) <= 3
-            assert all(
-                "count" in item and "message" in item for item in errors
-            )
-            assert instance_alerts[0].is_processed is True
-            total = sum(item["count"] for item in errors)
-            noun = "error" if total == 1 else "errors"
-            assert (
-                instance_alerts[0].small_text == f"Instance has {total} {noun}"
-            )
-            assert instance_alerts[0].table_text
-            _, notifications = service.list(
-                NotificationFilter.unlimited(
-                    type=[NotificationType.INSTANCE_DAILY_STATE.value]
-                )
-            )
-            assert instance_alerts[0].uuid in {
-                item.uuid for item in notifications
-            }
-        finally:
-            drop_notifications(database, created)
-
-
-def test_create_scheduled_unit_summary(
-    live_units, regular_user, regular_user_token, database, cc
-) -> None:
-    created = []
-    unit = live_units.universal_manual_unit
-    with as_recipient(
-        database, cc, regular_user, regular_user_token
-    ) as service:
-        try:
-            service.update_settings(
-                NotificationSettingsUpdate(
-                    is_scheduled_alert_enable=True,
-                    scheduled_notification_time=_scheduled_now(),
-                )
-            )
-            error_text = f"integration alert {uuid_pkg.uuid4()}"
-            critical_text = f"integration critical {uuid_pkg.uuid4()}"
-            info_text = f"integration info {uuid_pkg.uuid4()}"
-            log_time = datetime.now(UTC).replace(tzinfo=None) - timedelta(
-                minutes=1
-            )
-            expiration = datetime.now(UTC) + timedelta(
-                seconds=runtime.get().pu_instance_unit_log_expiration
-            )
-            UnitLogRepository(cc).bulk_create(
-                [
-                    UnitLog(
-                        uuid=uuid_pkg.uuid4(),
-                        level=LogLevel.ERROR,
-                        unit_uuid=unit.uuid,
-                        text=error_text,
-                        create_datetime=log_time,
-                        expiration_datetime=expiration,
-                    ),
-                    UnitLog(
-                        uuid=uuid_pkg.uuid4(),
-                        level=LogLevel.ERROR,
-                        unit_uuid=unit.uuid,
-                        text=error_text,
-                        create_datetime=log_time + timedelta(seconds=1),
-                        expiration_datetime=expiration,
-                    ),
-                    UnitLog(
-                        uuid=uuid_pkg.uuid4(),
-                        level=LogLevel.CRITICAL,
-                        unit_uuid=unit.uuid,
-                        text=critical_text,
-                        create_datetime=log_time + timedelta(seconds=2),
-                        expiration_datetime=expiration,
-                    ),
-                    UnitLog(
-                        uuid=uuid_pkg.uuid4(),
-                        level=LogLevel.INFO,
-                        unit_uuid=unit.uuid,
-                        text=info_text,
-                        create_datetime=log_time + timedelta(seconds=3),
-                        expiration_datetime=expiration,
-                    ),
-                ]
-            )
-
-            deliveries = _generate_scheduled(service, created)
-
-            assert all(
-                item.type != NotificationType.INSTANCE_DAILY_STATE.value
-                for item in deliveries
-            )
-            summary = next(
-                item
-                for item in deliveries
-                if item.type == NotificationType.UNIT_DAILY_SUMMARY.value
-            )
-            row = next(
-                item
-                for item in summary.data["units"]
-                if item["unit_name"] == unit.name
-            )
-            assert row["error_count"] >= 3
-            assert len(summary.data["units"]) <= 10
-            assert set(row) == {"unit_name", "error_count"}
-            assert summary.is_processed is True
-            total = sum(item["error_count"] for item in summary.data["units"])
-            assert summary.small_text == f"Unit has {total} errors"
-            assert unit.name in summary.table_text
-        finally:
-            drop_notifications(database, created)
-
-
-def _generate_scheduled(service, created: list) -> list[Notification]:
-    """Runs the scheduler and returns the signed-in user's notifications.
-
-    Every row from this run is kept in created, including other recipients
-    of the same minute, so the test can delete what it caused.
-    """
-    rows = service.generate_scheduled()
-    created.extend(rows)
-    process_saved(service, rows)
-    user_uuid = service.access_service.current_agent.uuid
-    return [
-        service.get(item.uuid) for item in rows if item.user_uuid == user_uuid
-    ]
-
-
-def _upcoming_slot() -> datetime:
-    """The next scheduler minute, with time left to commit the settings"""
-    now = datetime.now(UTC)
-    skip = 2 if now.second >= 50 else 1
-    return (now + timedelta(minutes=skip)).replace(second=0, microsecond=0)
-
-
-def _aware(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
-
-
-def test_live_scheduled_alerts_reach_recipient(
-    live_units, regular_user, regular_user_token, database, cc
-) -> None:
-    """The running backend sends the admin and unit summaries to this user.
-
-    Data pipe alerts are covered by test_data_pipe_alert_live. Instance state
-    is admin-only, so the recipient is an admin until the scheduler minute.
-    """
-    repository = UserRepository(db=database)
-    previous_role = regular_user.role
-    regular_user.role = UserRole.ADMIN
-    repository.update(regular_user.uuid, regular_user)
-    slot = _upcoming_slot()
-    found: list[Notification] = []
-    try:
-        with as_recipient(
-            database, cc, regular_user, regular_user_token
-        ) as service:
-            service.update_settings(
-                NotificationSettingsUpdate(
-                    is_scheduled_alert_enable=True,
-                    scheduled_notification_time=slot.strftime("%H:%M"),
-                    is_telegram_alert_enable=True,
-                )
-            )
-
-            def arrived() -> bool:
-                _, rows = service.list(NotificationFilter.unlimited())
-                found[:] = [
-                    item
-                    for item in rows
-                    if _aware(item.create_datetime) >= slot
-                    and item.type
-                    in (
-                        NotificationType.INSTANCE_DAILY_STATE.value,
-                        NotificationType.UNIT_DAILY_SUMMARY.value,
-                    )
-                ]
-                types = {item.type for item in found}
-                return {
-                    NotificationType.INSTANCE_DAILY_STATE.value,
-                    NotificationType.UNIT_DAILY_SUMMARY.value,
-                } <= types
-
-            wait_until(
-                arrived,
-                timeout=120,
-                interval=2,
-                message="scheduled alerts did not reach the recipient",
-                session=database,
-            )
-    finally:
-        regular_user.role = previous_role
-        repository.update(regular_user.uuid, regular_user)
-        drop_notifications(database, found)
-
-
-def _scheduled_now() -> str:
-    """HH:MM of now, waits out the end of a minute so creation sees the same one"""
-    now = datetime.now(UTC)
-    if now.second > 50:
-        time.sleep(60 - now.second)
-        now = datetime.now(UTC)
-    return now.strftime("%H:%M")

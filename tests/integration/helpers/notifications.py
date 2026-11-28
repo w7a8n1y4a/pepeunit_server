@@ -12,12 +12,16 @@ from app.configs.db import get_hand_session
 from app.configs.redis import get_redis_session
 from app.domain.notification_model import Notification
 from app.domain.notification_settings_model import NotificationSettings
+from app.domain.operation_task_model import OperationTask
 from app.domain.user_model import User
-from app.dto.enum import NotificationType
+from app.dto.enum import NotificationType, OperationTaskStatus
 from app.repositories.notification_repository import NotificationRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.pydantic.instance_resources import InstanceResourceSample
-from app.schemas.pydantic.notification import NotificationSettingsUpdate
+from app.schemas.pydantic.notification import (
+    NotificationFilter,
+    NotificationSettingsUpdate,
+)
 from app.services.notification_delivery import notification_delivery
 from app.services.notification_service import NotificationService
 from app.utils.utils import ensure_timezone_aware
@@ -150,34 +154,31 @@ def notification_was_delivered(
     return asyncio.run(has_notification())
 
 
-def latest_notification(database, user_uuid) -> Notification | None:
-    return (
-        database.query(Notification)
-        .filter(Notification.user_uuid == user_uuid)
-        .order_by(Notification.create_datetime.desc())
-        .first()
+def wait_for_task_alerts(
+    service: NotificationService, task: OperationTask
+) -> tuple[Notification, Notification]:
+    filters = NotificationFilter.unlimited(type=[task.task_type])
+    started = ensure_timezone_aware(task.start_datetime)
+    alerts: dict[str, Notification] = {}
+
+    def stored() -> bool:
+        _, rows = service.list(filters)
+        for row in rows:
+            value = row.data.get("start_datetime")
+            if value is None:
+                continue
+            moment = ensure_timezone_aware(datetime.fromisoformat(value))
+            if moment == started:
+                alerts[row.data["status"]] = row
+        return OperationTaskStatus.RUNNING in alerts and task.status in alerts
+
+    wait_until(
+        stored,
+        timeout=25,
+        message=f"The backend did not process the alerts for {task.task_type}",
+        session=service.notification_repository.db,
     )
-
-
-def process_saved(service, notifications: list[Notification]) -> None:
-    """Processes batches until these rows are closed.
-
-    The job also picks up other unprocessed rows, so one pass is not enough
-    when the table is already busy.
-    """
-    waiting = {item.uuid for item in notifications}
-    for _ in range(10):
-        if not waiting:
-            return
-        asyncio.run(service.process_pending())
-        done = [
-            uuid
-            for uuid in waiting
-            if service.notification_repository.get(
-                Notification(uuid=uuid)
-            ).is_processed
-        ]
-        waiting.difference_update(done)
+    return alerts[OperationTaskStatus.RUNNING], alerts[task.status]
 
 
 def drop_notification(database, uuid: uuid_pkg.UUID) -> None:

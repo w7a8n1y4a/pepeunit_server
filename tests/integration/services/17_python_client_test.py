@@ -1,8 +1,11 @@
 import json
+import re
 import uuid as uuid_pkg
 from pathlib import Path
 from queue import Queue
 
+import httpx
+import pytest
 from clickhouse_driver import Client
 from paho.mqtt.client import MQTTMessage
 from pepeunit_client import AesGcmCipher, PepeunitClient
@@ -10,6 +13,8 @@ from pepeunit_client.file_manager import FileManager
 from pepeunit_client.io_topics import IOTopic
 from sqlmodel import Session
 
+from app import runtime
+from app.configs.error_codes import ErrorCode
 from app.domain.unit_model import Unit
 from app.dto.enum import (
     BackendTopicCommand,
@@ -23,10 +28,12 @@ from tests.client.mqtt import COUNTER_INPUT, COUNTER_OUTPUT
 from tests.integration.fixtures.units import PREVIOUS_MANIFEST_COMMIT
 from tests.integration.helpers.http import (
     api_request,
+    get_unit_logs_file,
     patch_input_state,
     patch_unit_commit,
     post_unit_command,
 )
+from tests.integration.helpers.mqtt import wait_for_live_log
 from tests.integration.helpers.services import unit_service
 from tests.integration.helpers.wait import wait_until
 
@@ -150,6 +157,16 @@ def test_sdk_downloads_env_and_persists_encrypted_state(
     assert response.json() == encrypted
     assert cipher.aes_gcm_decode(sdk_unit.get_state_storage(), key) == value
 
+    with pytest.raises(httpx.HTTPStatusError) as error:
+        sdk_unit.set_state_storage(
+            "t" * (runtime.get().pu_instance_cipher_max_length + 1)
+        )
+    assert (
+        error.value.response.json()["error_code"]
+        == ErrorCode.CIPHER_CONTENT_TOO_LONG
+    )
+    assert sdk_unit.get_state_storage() == encrypted
+
 
 def test_sdk_discovers_linked_unit(
     sdk_unit: PepeunitClient,
@@ -190,7 +207,7 @@ def test_sdk_discovers_linked_unit(
     ]
 
 
-def test_sdk_syncs_every_log_level(
+def test_sdk_syncs_and_exports_every_log_level(
     sdk_unit: PepeunitClient,
     crud_unit: Unit,
     regular_user_token: str,
@@ -209,21 +226,7 @@ def test_sdk_syncs_every_log_level(
     filters = UnitLogFilter.unlimited(
         uuid=crud_unit.uuid, level=[level.value for level in LogLevel]
     )
-    online_log = f"SDK connected to the log pipeline {crud_unit.uuid}"
-
-    def live_log_stored() -> bool:
-        if any(
-            entry.text == online_log for entry in service.log_list(filters)[1]
-        ):
-            return True
-        logger.info(online_log)
-        return False
-
-    wait_until(
-        live_log_stored,
-        timeout=30,
-        message="MessageProcessor did not store a live SDK log",
-    )
+    wait_for_live_log(sdk_unit, service, crud_unit.uuid)
     logger.reset_log()
     assert logger.get_full_log() == []
     expected = {}
@@ -256,3 +259,23 @@ def test_sdk_syncs_every_log_level(
     wait_until(
         synced, timeout=30, message="SDK did not upload its NDJSON logs"
     )
+
+    exported = get_unit_logs_file(regular_user_token, crud_unit)
+    assert exported.status_code == 200
+    assert (
+        f'filename="{crud_unit.name}.log"'
+        in exported.headers["content-disposition"]
+    )
+    lines = exported.text.splitlines()
+    selected = [line for line in lines if line.split(" - ", 2)[-1] in expected]
+    _, stored = service.log_list(filters)
+    assert sorted(selected) == sorted(
+        entry.to_log_line() for entry in stored if entry.text in expected
+    )
+    assert len(selected) == len(expected)
+    pattern = re.compile(
+        r"^(DEBUG|INFO|WARNING|ERROR|CRITICAL) - \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} - .+$"
+    )
+    assert all(pattern.fullmatch(line) for line in selected)
+    timestamps = [line.split(" - ", 2)[1] for line in selected]
+    assert timestamps == sorted(timestamps)

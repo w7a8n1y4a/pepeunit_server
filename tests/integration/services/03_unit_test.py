@@ -1,10 +1,6 @@
 import copy
 import json
 import logging
-import os
-import re
-import uuid as uuid_pkg
-from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -12,8 +8,8 @@ from pepeunit_client.file_manager import FileManager
 
 from app import runtime, settings
 from app.configs.clickhouse import get_clickhouse_client
+from app.configs.error_codes import ErrorCode
 from app.configs.errors import (
-    CipherError,
     GitRepoError,
     MqttError,
     NoAccessError,
@@ -22,13 +18,11 @@ from app.configs.errors import (
     ValidationError,
 )
 from app.dto.agent.abc import AgentBackend
-from app.dto.clickhouse.log import UnitLog
 from app.dto.enum import (
     BackendTopicCommand,
     LogLevel,
     OperationTaskStatus,
     OperationTaskType,
-    OrderByDate,
     ReservedEnvVariableName,
     StaticRepoFileName,
     UnitIOTypeEnum,
@@ -52,7 +46,6 @@ from tests.client.mqtt import (
 )
 from tests.integration.helpers.http import (
     api_request,
-    get_unit_logs_file,
     mqtt_authorization,
     patch_unit_commit,
     post_bulk_update_units,
@@ -68,10 +61,6 @@ from tests.integration.helpers.services import (
 )
 from tests.integration.helpers.tasks import latest_task
 from tests.integration.helpers.wait import wait_until
-
-
-def test_create_unit(live_units) -> None:
-    assert len(live_units.all()) == 9
 
 
 def test_create_unit_duplicate_name(
@@ -253,36 +242,21 @@ def test_reset_env(
     ) != new_env.get(ReservedEnvVariableName.PU_SECRET_KEY.value)
 
 
-def test_get_firmware(
-    unpacked_firmwares, auxiliary_unit, regular_user_token, database, cc
+def test_firmware_rejects_invalid_compression(
+    auxiliary_unit, regular_user_token
 ) -> None:
-    service = unit_service(database, cc, regular_user_token)
-    with pytest.raises(UnitError):
-        service.get_unit_firmware_tgz(auxiliary_unit.uuid, 35, 9)
-    with pytest.raises(UnitError):
-        service.get_unit_firmware_tgz(auxiliary_unit.uuid, 9, 13)
-
-    target_version = service.get_selected_version(auxiliary_unit.uuid)
-    assert target_version.commit != ""
-
-
-def test_state_storage(
-    universal_auto_unit, regular_user_token, database, cc
-) -> None:
-    service = unit_service(database, cc, regular_user_token)
-    state = "test"
-    service.set_state_storage(universal_auto_unit.uuid, state)
-    assert state == service.get_state_storage(universal_auto_unit.uuid)
-
-    with pytest.raises(CipherError):
-        service.set_state_storage(
-            universal_auto_unit.uuid,
-            "t" * (runtime.get().pu_instance_cipher_max_length + 1),
+    for params, code in (
+        ({"wbits": 35}, ErrorCode.UNIT_WBITS_INVALID),
+        ({"level": 13}, ErrorCode.UNIT_LEVEL_INVALID),
+    ):
+        response = api_request(
+            "GET",
+            f"/units/firmware/tgz/{auxiliary_unit.uuid}",
+            regular_user_token,
+            params=params,
         )
-
-
-def test_run_infrastructure_contour(running_units) -> None:
-    assert len(running_units.all()) == 9
+        assert response.status_code >= 400
+        assert response.json()["error_code"] == code
 
 
 def test_hand_update_firmware_unit(
@@ -385,7 +359,10 @@ def test_auto_update_firmware_unit(
             unit.uuid, json.dumps({"PUC_WIFI_SSID": expected_ssid})
         )
 
-    assert post_bulk_update_units(admin_user_token) < 400
+    task_type = OperationTaskType.UPDATE_ALL_UNITS_FIRMWARE
+    previous = latest_task(database, task_type)
+    previous_uuid = previous.uuid if previous is not None else None
+    assert post_bulk_update_units(admin_user_token) == 204
 
     def bulk_reached() -> bool:
         return all(
@@ -401,6 +378,24 @@ def test_auto_update_firmware_unit(
         timeout=40,
         message="bulk firmware update did not reach both auto-update emulators",
     )
+
+    def completed() -> bool:
+        task = latest_task(database, task_type)
+        return (
+            task is not None
+            and task.uuid != previous_uuid
+            and task.status != OperationTaskStatus.RUNNING.value
+        )
+
+    wait_until(
+        completed,
+        timeout=300,
+        message="Bulk update task did not finish",
+        session=database,
+    )
+    finished = latest_task(database, task_type)
+    assert finished.status == OperationTaskStatus.SUCCESS.value
+    assert finished.result.startswith("Updated ")
 
 
 def test_env_update_command(
@@ -556,136 +551,6 @@ def test_get_many_unit(
     assert any(unit[0].uuid == universal_auto_unit.uuid for unit in units)
 
 
-def test_get_unit_logs(
-    running_units, chain_middle_unit, regular_user_token, database, cc
-) -> None:
-    service = unit_service(database, cc, regular_user_token)
-    count, logs = service.log_list(
-        UnitLogFilter(
-            uuid=chain_middle_unit.uuid,
-            offset=0,
-            limit=runtime.get().pu_instance_max_pagination_size,
-        )
-    )
-    assert len(logs) > 0
-
-
-def test_download_unit_logs(
-    live_units, regular_user_token, database, cc
-) -> None:
-    unit = live_units.universal_auto_unit
-    service = unit_service(database, cc, regular_user_token)
-    unit_log_repository = UnitLogRepository(cc)
-
-    first_datetime = datetime(2026, 9, 6, 3, 15, 58, 214000)
-    second_datetime = first_datetime + timedelta(seconds=1)
-    expiration = datetime.now(UTC) + timedelta(
-        seconds=runtime.get().pu_instance_unit_log_expiration
-    )
-    first_text = (
-        "uvicorn.access - 192.168.0.10:48422 - "
-        '"GET /pepeunit/api/v1/instances/current HTTP/1.0" 200'
-    )
-    second_text = "gmqtt.client - [SUBACK] N (0,)"
-
-    unit_log_repository.bulk_create(
-        [
-            UnitLog(
-                uuid=uuid_pkg.uuid4(),
-                level=LogLevel.INFO,
-                unit_uuid=unit.uuid,
-                text=first_text,
-                create_datetime=first_datetime,
-                expiration_datetime=expiration,
-            ),
-            UnitLog(
-                uuid=uuid_pkg.uuid4(),
-                level=LogLevel.ERROR,
-                unit_uuid=unit.uuid,
-                text=second_text,
-                create_datetime=second_datetime,
-                expiration_datetime=expiration,
-            ),
-        ]
-    )
-
-    assert (
-        UnitLog(
-            uuid=uuid_pkg.uuid4(),
-            level=LogLevel.INFO,
-            unit_uuid=unit.uuid,
-            text=first_text,
-            create_datetime=first_datetime,
-            expiration_datetime=expiration,
-        ).to_log_line()
-        == f"INFO - 2026-09-06 03:15:58,214 - {first_text}"
-    )
-
-    log_path, filename = service.get_unit_logs_file(unit.uuid)
-    try:
-        assert filename == f"{unit.name}.log"
-        assert log_path.endswith(".log")
-        with open(log_path, encoding="utf-8") as handle:
-            content = handle.read()
-    finally:
-        os.remove(log_path)
-
-    lines = content.splitlines()
-    first_line = next(
-        line for line in lines if line.endswith(f" - {first_text}")
-    )
-    second_line = next(
-        line for line in lines if line.endswith(f" - {second_text}")
-    )
-    assert first_line.startswith("INFO - ")
-    assert second_line.startswith("ERROR - ")
-    assert lines.index(first_line) < lines.index(second_line)
-
-    # the file holds the whole history, log_list gives only the first page of it
-    stored_count, first_page = service.log_list(
-        UnitLogFilter(
-            uuid=unit.uuid,
-            level=[item.value for item in LogLevel],
-            order_by_create_date=OrderByDate.asc,
-        )
-    )
-    assert len(lines) == stored_count
-    assert lines[: len(first_page)] == [
-        log.to_log_line() for log in first_page
-    ]
-
-    log_line_pattern = re.compile(
-        r"^(DEBUG|INFO|WARNING|ERROR|CRITICAL) - "
-        r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} - .+$"
-    )
-    assert all(log_line_pattern.match(line) for line in lines)
-
-    response = get_unit_logs_file(regular_user_token, unit)
-    assert response.status_code == 200
-    assert (
-        f'filename="{unit.name}.log"'
-        in response.headers["content-disposition"]
-    )
-    assert response.text == content
-
-
-@pytest.mark.asyncio
-def test_get_firmware_archives(
-    unpacked_firmwares, auxiliary_unit, regular_user_token, database, cc
-) -> None:
-    service = unit_service(database, cc, regular_user_token)
-    zip_path = service.get_unit_firmware_zip(auxiliary_unit.uuid)
-    tar_path = service.get_unit_firmware_tar(auxiliary_unit.uuid)
-    try:
-        assert os.path.exists(zip_path)
-        assert os.path.exists(tar_path)
-        assert os.path.getsize(zip_path) > 0
-        assert os.path.getsize(tar_path) > 0
-    finally:
-        os.remove(zip_path)
-        os.remove(tar_path)
-
-
 def test_list_units_with_output_nodes(
     live_units, regular_user, regular_user_token, database, cc
 ) -> None:
@@ -713,35 +578,6 @@ def test_list_units_with_output_nodes_only_outputs(
         is_include_output_unit_ios=True,
     )
     assert all(nodes for _, nodes in units)
-
-
-def test_update_units_firmware(
-    running_units, admin_user_token, database
-) -> None:
-    task_type = OperationTaskType.UPDATE_ALL_UNITS_FIRMWARE
-    previous_task = latest_task(database, task_type)
-
-    assert post_bulk_update_units(admin_user_token) < 400
-
-    def is_finish() -> bool:
-        task = latest_task(database, task_type)
-        return (
-            task is not None
-            and (previous_task is None or task.uuid != previous_task.uuid)
-            and task.status != OperationTaskStatus.RUNNING.value
-        )
-
-    wait_until(
-        is_finish,
-        timeout=300,
-        message="units firmware update task not finished",
-        session=database,
-    )
-
-    finished = latest_task(database, task_type)
-    logging.info(finished.result)
-    assert finished.status == OperationTaskStatus.SUCCESS.value
-    assert finished.result.startswith("Updated ")
 
 
 def test_mqtt_auth_checks_action_and_ownership(

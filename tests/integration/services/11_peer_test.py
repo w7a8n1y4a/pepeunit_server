@@ -37,7 +37,6 @@ from tests.integration.helpers.services import (
     peer_service,
     repo_service,
 )
-from tests.integration.helpers.tasks import age_tasks
 from tests.integration.helpers.wait import wait_task_finish
 
 
@@ -342,8 +341,6 @@ def test_scan_one_unreachable(
 def test_scan_all(trusted_peers, admin_user_token, database) -> None:
     service = peer_service(database, admin_user_token)
     logging.info(trusted_peers.own_peer.uuid)
-    age_tasks(database, OperationTaskType.SCAN_ALL_PEERS)
-
     task = service.scan_all()
     assert task.task_type == OperationTaskType.SCAN_ALL_PEERS.value
     assert task.status == OperationTaskStatus.RUNNING.value

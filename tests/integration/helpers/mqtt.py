@@ -3,8 +3,11 @@ import uuid as uuid_pkg
 from contextlib import contextmanager
 
 from paho.mqtt import client as mqtt
+from pepeunit_client import PepeunitClient
 from pydantic import JsonValue
 
+from app.dto.enum import LogLevel
+from app.schemas.pydantic.unit import UnitLogFilter
 from app.schemas.pydantic.unit_io import (
     LinkCreate,
     UnitIOTopicRead,
@@ -132,3 +135,22 @@ def publish_and_receive(
     )
     assert message is not None
     return message
+
+
+def wait_for_live_log(
+    client: PepeunitClient, service: UnitService, unit_uuid: uuid_pkg.UUID
+) -> None:
+    filters = UnitLogFilter.unlimited(uuid=unit_uuid, level=[LogLevel.INFO])
+    text = f"SDK connected to the log pipeline {unit_uuid}"
+
+    def stored() -> bool:
+        if any(entry.text == text for entry in service.log_list(filters)[1]):
+            return True
+        client.logger.info(text)
+        return False
+
+    wait_until(
+        stored,
+        timeout=30,
+        message="MessageProcessor did not store a live SDK log",
+    )

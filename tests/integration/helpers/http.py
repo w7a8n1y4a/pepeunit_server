@@ -78,17 +78,6 @@ def post_unit_command(token: str, unit, command: BackendTopicCommand) -> int:
     return _status(response)
 
 
-def post_schema_update(token: str, unit_uuid: uuid_pkg.UUID) -> int:
-    url = (
-        f"{settings.pu_link_prefix_and_v1}/units/"
-        f"send_command_to_input_base_topic/{unit_uuid}?command=SchemaUpdate"
-    )
-    response = httpx.post(
-        url=url, headers=_headers(token), timeout=runtime.get().http_timeout()
-    )
-    return _status(response)
-
-
 def patch_input_state(
     token: str, unit_io_uuid: uuid_pkg.UUID, state: str
 ) -> int:

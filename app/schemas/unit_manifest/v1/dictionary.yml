@@ -119,12 +119,12 @@ input:
     description: Download and apply the current .env.
     fields:
       command: {type: string, max_bytes: 16, enum: [EnvUpdate]}
-  schema_update:
+  io_topics_update:
     type: object
     qos: 1
     description: Download the current io_topics.yml and update subscriptions.
     fields:
-      command: {type: string, max_bytes: 16, enum: [SchemaUpdate]}
+      command: {type: string, max_bytes: 16, enum: [IOTopicsUpdate]}
   log_sync:
     type: object
     qos: 1

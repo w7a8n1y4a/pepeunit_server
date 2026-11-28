@@ -25,11 +25,14 @@ from app.dto.agent.abc import AgentBackend
 from app.dto.clickhouse.log import UnitLog
 from app.dto.enum import (
     BackendTopicCommand,
+    BackendTopicCommandKey,
     LogLevel,
+    MqttQos,
     OperationTaskStatus,
     OperationTaskType,
     OrderByDate,
     ReservedEnvVariableName,
+    ReservedInputBaseTopic,
     StaticRepoFileName,
     UnitIOTypeEnum,
     VisibilityLevel,
@@ -50,9 +53,9 @@ from tests.integration.helpers.http import (
     mqtt_authorization,
     patch_unit_commit,
     post_bulk_update_units,
-    post_schema_update,
     post_unit_command,
 )
+from tests.integration.helpers.mqtt import MQTTProbe
 from tests.integration.helpers.names import unique_name
 from tests.integration.helpers.services import (
     branch_commits,
@@ -423,18 +426,25 @@ def test_env_update_command(
     )
 
 
-def test_schema_update_command(
-    running_units, chain_sink_unit, client_emulator, regular_user_token
+def test_io_topics_update_command(
+    crud_unit, regular_user_token, database, cc
 ) -> None:
-    client = client_emulator.clients[chain_sink_unit.uuid].client
-    previous = client.io_topics
-    assert post_schema_update(regular_user_token, chain_sink_unit.uuid) == 204
-    wait_until(
-        lambda: client.io_topics is not previous,
-        timeout=20,
-        message="SDK did not fetch new IO topics after SchemaUpdate",
-    )
-    assert client.io_topics == previous
+    service = unit_service(database, cc, regular_user_token)
+    probe = MQTTProbe.from_unit(service, crud_unit.uuid)
+    topic = probe.topics.input[ReservedInputBaseTopic.IO_TOPICS_UPDATE]
+    command = BackendTopicCommand.IO_TOPICS_UPDATE
+
+    with probe.connected():
+        probe.subscribe(topic)
+        assert post_unit_command(regular_user_token, crud_unit, command) == 204
+        received = probe.receive(timeout=5)
+
+    assert received is not None
+    assert received.topic == topic.topic
+    assert received.qos == MqttQos.AT_LEAST_ONCE.value
+    assert json.loads(received.payload) == {
+        BackendTopicCommandKey.COMMAND: command.value
+    }
 
 
 def test_log_sync_command(

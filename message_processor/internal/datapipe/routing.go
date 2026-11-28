@@ -28,11 +28,11 @@ type publishMessage func(context.Context, string, []byte, byte) error
 func (p *Processor) processUnitIOMessage(ctx context.Context, ioUUID string, payload []byte, receivedAt time.Time) error {
 	snapshot := p.snapshot.Load()
 	if snapshot == nil {
-		return errors.New("MessageProcessor schemas have not been loaded")
+		return errors.New("MessageProcessor snapshot has not been loaded")
 	}
 	source, exists := snapshot.unitIOs[ioUUID]
 	if !exists {
-		return fmt.Errorf("UnitIO %s has no loaded schema", ioUUID)
+		return fmt.Errorf("UnitIO %s has no loaded manifest definition", ioUUID)
 	}
 	if p.resources != nil {
 		p.resources.add(receivedAt, database.UnitIOResourceWindow{

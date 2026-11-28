@@ -483,7 +483,7 @@ class TestTelegramBot:
         )
         unit_service.get_env.return_value = {"SERIAL": "<&>"}
         unit_service.unit_io_service.list_commands.return_value = [
-            BackendTopicCommand.ENV_UPDATE
+            BackendTopicCommand.IO_TOPICS_UPDATE
         ]
         unit_service.unit_io_service.command_to_input_base_topic.return_value = False
         unit_service.unit_io_service.list.return_value = (1, [node])
@@ -554,21 +554,19 @@ class TestTelegramBot:
         )
 
         await telegram.tap(
-            card_id,
-            telegram.button_data(card, BackendTopicCommand.ENV_UPDATE.value),
+            card_id, telegram.button_data(card, "IOTopicsUpdate")
         )
         unit_service.unit_io_service.command_to_input_base_topic.assert_called_once_with(
-            unit.uuid, BackendTopicCommand.ENV_UPDATE
+            unit.uuid, BackendTopicCommand.IO_TOPICS_UPDATE
         )
         assert telegram.methods(AnswerCallbackQuery)[-1].show_alert
         unit_service.unit_io_service.command_to_input_base_topic.return_value = True
         await telegram.tap(
-            card_id,
-            telegram.button_data(card, BackendTopicCommand.ENV_UPDATE.value),
+            card_id, telegram.button_data(card, "IOTopicsUpdate")
         )
         assert (
             telegram.methods(AnswerCallbackQuery)[-1].text
-            == "EnvUpdate sent to unit."
+            == "IOTopicsUpdate sent to unit."
         )
 
         archive = tmp_path / "firmware.zip"

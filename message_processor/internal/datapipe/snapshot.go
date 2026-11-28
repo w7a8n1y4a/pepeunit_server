@@ -50,7 +50,7 @@ func (p *Processor) startSnapshotSync(ctx context.Context) (chan<- struct{}, <-c
 			case <-requests:
 				if err := p.LoadSnapshot(ctx); err != nil {
 					if ctx.Err() == nil {
-						logging.Errorf("Failed to reload MessageProcessor schemas: %v", err)
+						logging.Errorf("Failed to reload MessageProcessor snapshot: %v", err)
 					}
 					continue
 				}
@@ -240,7 +240,7 @@ func buildSnapshot(
 			definition = definitions.Output[node.TopicName]
 		}
 		if definition == nil {
-			logging.Warningf("Skipping Unit %s: no schema for %s %q (%s)", node.UnitUUID, node.Direction, node.TopicName, node.UUID)
+			logging.Warningf("Skipping Unit %s: no manifest definition for %s %q (%s)", node.UnitUUID, node.Direction, node.TopicName, node.UUID)
 			delete(units, node.UnitUUID)
 			continue
 		}
